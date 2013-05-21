@@ -1,6 +1,6 @@
-From 7f2f417cf0d44ae9b20d8f925ad0aa4e3f9903ff Mon Sep 17 00:00:00 2001
+From f0e03da7a11eb9c0015dcc2b7cff3d5a760ae4f7 Mon Sep 17 00:00:00 2001
 From: hglm <synapsid_on_si@yahoo.com>
-Date: Tue, 21 May 2013 00:24:01 +0200
+Date: Tue, 21 May 2013 09:55:16 +0200
 Subject: [PATCH] Implement G2D FillRect and size threshold for CopyArea blt
 
 1. Implement an area threshold for using G2D blits in sunxi_disp.c,
@@ -15,14 +15,41 @@ Subject: [PATCH] Implement G2D FillRect and size threshold for CopyArea blt
    fill_in_three function to fill in three segments using 32-bit
    format for the middle segment.
 5. Add the hook for xPolyFillRect to xCreateGC.
+6. Add use_G2D flag to SunxiG2D struct that indicates whether G2D
+   acceleration is enabled. This flag is used to determine whether
+   G2D FillRect should be used.
 
 Signed-off-by: hglm <synapsid_on_si@yahoo.com>
 ---
- src/sunxi_disp.c  |  112 ++++++++++++++++++++++++++++++-
+ src/fbdev.c       |    4 +-
+ src/sunxi_disp.c  |  112 ++++++++++++++++++++++++++++-
  src/sunxi_disp.h  |   24 +++++++
- src/sunxi_x_g2d.c |  194 ++++++++++++++++++++++++++++++++++++++++++++++++-----
- 3 files changed, 312 insertions(+), 18 deletions(-)
+ src/sunxi_x_g2d.c |  201 ++++++++++++++++++++++++++++++++++++++++++++++++-----
+ src/sunxi_x_g2d.h |    3 +-
+ 5 files changed, 322 insertions(+), 22 deletions(-)
 
+diff --git a/src/fbdev.c b/src/fbdev.c
+index da54673..36ef523 100644
+--- a/src/fbdev.c
++++ b/src/fbdev.c
+@@ -886,7 +886,7 @@ FBDevScreenInit(SCREEN_INIT_ARGS_DECL)
+ 						strcasecmp(accelmethod, "g2d") == 0) {
+ 		sunxi_disp_t *disp = fPtr->sunxi_disp_private;
+ 		if (disp && disp->fd_g2d >= 0 &&
+-		    (fPtr->SunxiG2D_private = SunxiG2D_Init(pScreen, &disp->blt2d))) {
++		    (fPtr->SunxiG2D_private = SunxiG2D_Init(pScreen, &disp->blt2d, TRUE))) {
+ 
+ 			xf86DrvMsg(pScrn->scrnIndex, X_INFO, "enabled G2D acceleration\n");
+ 		}
+@@ -903,7 +903,7 @@ FBDevScreenInit(SCREEN_INIT_ARGS_DECL)
+ 	}
+ 
+ 	if (!fPtr->SunxiG2D_private && cpu_backend->cpuinfo->has_arm_neon) {
+-		if ((fPtr->SunxiG2D_private = SunxiG2D_Init(pScreen, &cpu_backend->blt2d))) {
++		if ((fPtr->SunxiG2D_private = SunxiG2D_Init(pScreen, &cpu_backend->blt2d, FALSE))) {
+ 			xf86DrvMsg(pScrn->scrnIndex, X_INFO, "enabled NEON optimizations\n");
+ 		}
+ 	}
 diff --git a/src/sunxi_disp.c b/src/sunxi_disp.c
 index 559598a..9d2fb3b 100644
 --- a/src/sunxi_disp.c
@@ -203,7 +230,7 @@ index dc3f304..66a2f62 100644
  int sunxi_g2d_blt(void               *disp,
                    uint32_t           *src_bits,
 diff --git a/src/sunxi_x_g2d.c b/src/sunxi_x_g2d.c
-index de91bbb..ba79d9f 100644
+index de91bbb..09911b7 100644
 --- a/src/sunxi_x_g2d.c
 +++ b/src/sunxi_x_g2d.c
 @@ -37,6 +37,7 @@
@@ -408,7 +435,7 @@ index de91bbb..ba79d9f 100644
 +            w = fullX2 - fullX1;
 +            h = fullY2 - fullY1;
 +            if (!pPriv->and && w * h >= fill_size_threshold) {
-+                if (dstBpp == 4)
++                if (dstBpp == 32)
 +                    sunxi_g2d_fill_a8r8g8b8(disp, x, y, w, h, pPriv->xor);
 +                else
 +                    sunxi_g2d_fill_r5g6b5_in_three(disp, x, y, w, h, pPriv->xor);
@@ -451,7 +478,7 @@ index de91bbb..ba79d9f 100644
 +                    w = partX2 - partX1;
 +                    h = partY2 - partY1;
 +                    if (!pPriv->and && w * h >= fill_size_threshold) {
-+                       if (dstBpp == 4)
++                       if (dstBpp == 32)
 +                            sunxi_g2d_fill_a8r8g8b8(disp, x, y, w, h, pPriv->xor);
 +                       else
 +                            sunxi_g2d_fill_r5g6b5_in_three(disp, x, y, w, h, pPriv->xor);
@@ -472,15 +499,52 @@ index de91bbb..ba79d9f 100644
  static Bool
  xCreateGC(GCPtr pGC)
  {
-@@ -228,6 +386,8 @@ xCreateGC(GCPtr pGC)
+@@ -228,6 +386,9 @@ xCreateGC(GCPtr pGC)
  
          /* Add our own hook for CopyArea function */
          self->pGCOps->CopyArea = xCopyArea;
-+        /* Add our own hook for PolyFillRect */
-+        self->pGCOps->PolyFillRect = xPolyFillRect;
++        if (self->use_G2D)
++            /* Add our own hook for PolyFillRect */
++            self->pGCOps->PolyFillRect = xPolyFillRect;
      }
      pGC->ops = self->pGCOps;
  
+@@ -236,7 +397,7 @@ xCreateGC(GCPtr pGC)
+ 
+ /*****************************************************************************/
+ 
+-SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d)
++SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d, BOOL use_G2D)
+ {
+     SunxiG2D *private = calloc(1, sizeof(SunxiG2D));
+     if (!private) {
+@@ -257,6 +418,10 @@ SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d)
+     private->CreateGC = pScreen->CreateGC;
+     pScreen->CreateGC = xCreateGC;
+ 
++    /* Set the flag that indicates whether the G2D hardware engine */
++    /* is used. */
++    private->use_G2D = use_G2D;
++
+     return private;
+ }
+ 
+diff --git a/src/sunxi_x_g2d.h b/src/sunxi_x_g2d.h
+index d58e25d..c59be43 100644
+--- a/src/sunxi_x_g2d.h
++++ b/src/sunxi_x_g2d.h
+@@ -47,9 +47,10 @@ typedef struct {
+                                 int       dst_y,
+                                 int       w,
+                                 int       h);
++    BOOL use_G2D;
+ } SunxiG2D;
+ 
+-SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d);
++SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d, BOOL use_G2D);
+ void SunxiG2D_Close(ScreenPtr pScreen);
+ 
+ #endif
 -- 
 1.7.10.4
 
