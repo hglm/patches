@@ -1,10 +1,10 @@
-From f49d6420eaa4055c07bbd53659244ccdfe2efba8 Mon Sep 17 00:00:00 2001
+From 50474e62a941081e28b5749954d33ce89e9e3a2f Mon Sep 17 00:00:00 2001
 From: hglm <synapsid_on_si@yahoo.com>
-Date: Tue, 21 May 2013 16:05:21 +0200
-Subject: [PATCH] Implement G2D FillRect and size threshold for CopyArea blt
+Date: Tue, 21 May 2013 20:16:58 +0200
+Subject: [PATCH] Implement G2D FillRect and G2D blit improvements
 
 1. Implement an area threshold for using G2D blits in sunxi_disp.c,
-   currently  set to 200.
+   currently set to 200.
 2. In xCopyNToN, it is guaranteed that alu == GXcopy and planemask
    == FB_ALL_ONES, so no need to check for them.
 3. Implement xPolyFillRect. Only the case of a drawable window, fill
@@ -20,14 +20,19 @@ Subject: [PATCH] Implement G2D FillRect and size threshold for CopyArea blt
 6. Add use_G2D flag to SunxiG2D struct that indicates whether G2D
    acceleration is enabled. This flag is used to determine whether
    G2D FillRect should be used.
+7. Implement "double speed" 16bpp blits. When source and
+   destination coordinates allow it, the blit is divided into up
+   to three segments with the aligned middle segment being copied in
+   32bpp mode.
 
 Signed-off-by: hglm <synapsid_on_si@yahoo.com>
 ---
  src/fbdev.c       |    4 +-
- src/sunxi_disp.c  |  112 ++++++++++++++++++-
+ src/sunxi_disp.c  |  208 ++++++++++++++++++++++++++++++++++
+ src/sunxi_disp.h  |   25 +++++
  src/sunxi_x_g2d.c |  320 ++++++++++++++++++++++++++++++++++++++++++++++++++---
  src/sunxi_x_g2d.h |    3 +-
- 4 files changed, 417 insertions(+), 22 deletions(-)
+ 5 files changed, 539 insertions(+), 21 deletions(-)
 
 diff --git a/src/fbdev.c b/src/fbdev.c
 index da54673..36ef523 100644
@@ -52,7 +57,7 @@ index da54673..36ef523 100644
  		}
  	}
 diff --git a/src/sunxi_disp.c b/src/sunxi_disp.c
-index 559598a..9d2fb3b 100644
+index 559598a..997bd40 100644
 --- a/src/sunxi_disp.c
 +++ b/src/sunxi_disp.c
 @@ -427,6 +427,109 @@ int sunxi_g2d_fill_a8r8g8b8(sunxi_disp_t *disp,
@@ -145,7 +150,7 @@ index 559598a..9d2fb3b 100644
 +        tmp.color               = color | (color << 16);
 +        if (ioctl(disp->fd_g2d, G2D_CMD_FILLRECT, &tmp))
 +            return - 1;
-+        x += (w >> 1) << 1;
++        x += (w >> 1) * 2;
 +        w &= 1;
 +    }
 +    if (w) {
@@ -165,22 +170,189 @@ index 559598a..9d2fb3b 100644
  int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
                              int           dst_x,
                              int           dst_y,
-@@ -505,7 +608,14 @@ int sunxi_g2d_blt(void               *self,
+@@ -467,6 +570,94 @@ int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
+ }
+ 
+ /*
++ * The following function implements a 16bpp blit using 32bpp mode by
++ * splitting the area into an aligned middle part (which is blit using
++ * 32bpp mode) and left and right edges if required.
++ *
++ * It assumes the parameters have already been validated by the caller.
++ * This includes the condition (src_x & 1) == (dst_x & 1), which is
++ * necessary to be able to use 32bpp mode.
++ */
++
++int sunxi_g2d_blit_r5g6b5_in_three(sunxi_disp_t *disp, uint8_t *src_bits,
++    uint8_t *dst_bits, int src_stride, int dst_stride, int src_x, int src_y,
++    int dst_x, int dst_y, int w, int h)
++{
++    g2d_blt tmp;
++
++    /* Set up the invariant blit parameters. */
++    tmp.flag                = G2D_BLT_NONE;
++    tmp.src_image.h         = src_y + h;
++    tmp.src_rect.y          = src_y;
++    tmp.src_rect.h          = h;
++    tmp.dst_image.h         = dst_y + h;
++    tmp.dst_y               = dst_y;
++    tmp.color               = 0;
++    tmp.alpha               = 0;
++
++    if (src_x & 1) {
++        tmp.src_image.addr[0]   = disp->framebuffer_paddr +
++                                  (src_bits - disp->framebuffer_addr);
++        tmp.src_image.format    = G2D_FMT_RGB565;
++        tmp.src_image.pixel_seq = G2D_SEQ_P10;
++        tmp.src_image.w         = src_stride * 2;
++        tmp.src_rect.x          = src_x;
++        tmp.src_rect.w          = 1;
++        tmp.dst_image.addr[0]   = disp->framebuffer_paddr +
++                                  (dst_bits - disp->framebuffer_addr);
++        tmp.dst_image.format    = G2D_FMT_RGB565;
++        tmp.dst_image.pixel_seq = G2D_SEQ_P10;
++        tmp.dst_image.w         = dst_stride * 2;
++        tmp.dst_x               = dst_x;
++        if (ioctl(disp->fd_g2d, G2D_CMD_BITBLT, &tmp))
++            return 0;
++        src_x++;
++        dst_x++;
++        w--;
++    }
++    if (w >= 2) {
++        int w2;
++        tmp.src_image.addr[0]   = disp->framebuffer_paddr +
++                                  (src_bits - disp->framebuffer_addr);
++        tmp.src_image.format    = G2D_FMT_ARGB_AYUV8888;
++        tmp.src_image.pixel_seq = G2D_SEQ_NORMAL;
++        tmp.src_image.w         = src_stride;
++        tmp.src_rect.x          = src_x >> 1;
++        tmp.src_rect.w          = w >> 1;
++        tmp.dst_image.addr[0]   = disp->framebuffer_paddr +
++                                  (dst_bits - disp->framebuffer_addr);
++        tmp.dst_image.format    = G2D_FMT_ARGB_AYUV8888;
++        tmp.dst_image.pixel_seq = G2D_SEQ_NORMAL;
++        tmp.dst_image.w         = dst_stride;
++        tmp.dst_x               = dst_x >> 1;
++        if (ioctl(disp->fd_g2d, G2D_CMD_BITBLT, &tmp))
++            return 0;
++        w2 = (w >> 1) * 2;
++        src_x += w2;
++        dst_x += w2;
++        w &= 1;
++    }
++    if (w) {
++        tmp.src_image.addr[0]   = disp->framebuffer_paddr +
++                                  (src_bits - disp->framebuffer_addr);
++        tmp.src_image.format    = G2D_FMT_RGB565;
++        tmp.src_image.pixel_seq = G2D_SEQ_P10;
++        tmp.src_image.w         = src_stride * 2;
++        tmp.src_rect.x          = src_x;
++        tmp.src_rect.w          = 1;
++        tmp.dst_image.addr[0]   = disp->framebuffer_paddr +
++                                  (dst_bits - disp->framebuffer_addr);
++        tmp.dst_image.format    = G2D_FMT_RGB565;
++        tmp.dst_image.pixel_seq = G2D_SEQ_P10;
++        tmp.dst_image.w         = dst_stride * 2;
++        tmp.dst_x               = dst_x;
++        if (ioctl(disp->fd_g2d, G2D_CMD_BITBLT, &tmp))
++            return 0;
++    }
++    return 1;
++}
++
++/*
+  * G2D counterpart for pixman_blt (function arguments are the same with
+  * only sunxi_disp_t extra argument added). Supports 16bpp (r5g6b5) and
+  * 32bpp (a8r8g8b8) formats and also conversion between them.
+@@ -489,6 +680,7 @@ int sunxi_g2d_blt(void               *self,
+                   int                 h)
+ {
+     sunxi_disp_t *disp = (sunxi_disp_t *)self;
++    int blt_size_threshold;
+     g2d_blt tmp;
+     /*
+      * Very minimal validation here. We just assume that if the begginging
+@@ -505,6 +697,18 @@ int sunxi_g2d_blt(void               *self,
          return 0;
      }
  
--    if (w <= 0 || h <= 0)
 +    /*
-+     * If the area is smaller than G2D_BLT_SIZE_THRESHOLD, prefer to avoid the overhead
-+     * of G2D and do a CPU blit instead.
++     * If the area is smaller than G2D_BLT_SIZE_THRESHOLD, prefer to avoid the
++     * overhead of G2D and do a CPU blit instead. There is a special threshold
++     * for 16bpp to 16bpp copy .
 +     */
-+    if (w * h < G2D_BLT_SIZE_THRESHOLD)
++    if (src_bpp == 16 && dst_bpp == 16)
++        blt_size_threshold = G2D_BLT_SIZE_THRESHOLD_16BPP;
++    else
++        blt_size_threshold = G2D_BLT_SIZE_THRESHOLD;
++    if (w * h < blt_size_threshold)
 +        return 0;
 +
-+    if (w <= 0 || h <= 0 || w * h < G2D_BLT_SIZE_THRESHOLD)
+     if (w <= 0 || h <= 0)
          return 1;
  
-     /* Unsupported overlapping type */
+@@ -515,6 +719,10 @@ int sunxi_g2d_blt(void               *self,
+     if (disp->fd_g2d < 0)
+         return 0;
+ 
++    if (src_bpp == 16 && dst_bpp == 16 && (src_x & 1) == (dst_x & 1))
++        return sunxi_g2d_blit_r5g6b5_in_three(disp, (uint8_t *)src_bits, (uint8_t *)dst_bits,
++            src_stride, dst_stride, src_x, src_y, dst_x, dst_y, w, h);
++
+     if ((src_bpp != 16 && src_bpp != 32) || (dst_bpp != 16 && dst_bpp != 32))
+         return 0;
+ 
+diff --git a/src/sunxi_disp.h b/src/sunxi_disp.h
+index dc3f304..72cda39 100644
+--- a/src/sunxi_disp.h
++++ b/src/sunxi_disp.h
+@@ -103,6 +103,11 @@ int sunxi_wait_for_vsync(sunxi_disp_t *ctx);
+  * Simple G2D fill and blit operations
+  */
+ 
++/* The following constants are used in sunxi_x_g2d.c and represent */
++/* the area threshold for falling back to CPU fill. */
++#define G2D_FILL_SIZE_THRESHOLD_32BPP 1000
++#define G2D_FILL_SIZE_THRESHOLD_16BPP 5000
++
+ int sunxi_g2d_fill_a8r8g8b8(sunxi_disp_t *disp,
+                             int           x,
+                             int           y,
+@@ -110,6 +115,20 @@ int sunxi_g2d_fill_a8r8g8b8(sunxi_disp_t *disp,
+                             int           h,
+                             uint32_t      color);
+ 
++int sunxi_g2d_fill_r5g6b5(sunxi_disp_t *disp,
++                            int           x,
++                            int           y,
++                            int           w,
++                            int           h,
++                            uint32_t      color);
++
++int sunxi_g2d_fill_r5g6b5_in_three(sunxi_disp_t *disp,
++                            int           x,
++                            int           y,
++                            int           w,
++                            int           h,
++                            uint32_t      color);
++
+ int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
+                             int           dst_x,
+                             int           dst_y,
+@@ -118,6 +137,12 @@ int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
+                             int           w,
+                             int           h);
+ 
++/* The following constant is used sunxi_disp.c and represents */
++/* the area threshold below which the sunxi_g2d_blit function will */
++/* return 0, indicating that a software blit is preferred. */
++#define G2D_BLT_SIZE_THRESHOLD 200
++#define G2D_BLT_SIZE_THRESHOLD_16BPP 1000
++
+ /* G2D counterpart for pixman_blt with the support for 16bpp and 32bpp */
+ int sunxi_g2d_blt(void               *disp,
+                   uint32_t           *src_bits,
 diff --git a/src/sunxi_x_g2d.c b/src/sunxi_x_g2d.c
 index de91bbb..749cae1 100644
 --- a/src/sunxi_x_g2d.c
