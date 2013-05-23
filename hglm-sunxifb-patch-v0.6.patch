@@ -1,6 +1,6 @@
-From 7beb7fc414996df78a8b4f0a466cfb48071c3f2a Mon Sep 17 00:00:00 2001
+From 2e761020f1ffc69af789d6ea0d84ed1cfe833724 Mon Sep 17 00:00:00 2001
 From: hglm <synapsid_on_si@yahoo.com>
-Date: Thu, 23 May 2013 23:15:12 +0200
+Date: Fri, 24 May 2013 01:20:29 +0200
 Subject: [PATCH] Implement G2D FillRect and G2D blit improvements, and
  optimize PutImage
 
@@ -35,9 +35,9 @@ Signed-off-by: hglm <synapsid_on_si@yahoo.com>
  src/fbdev.c       |    4 +-
  src/sunxi_disp.c  |  216 ++++++++++++++++++++++++++++
  src/sunxi_disp.h  |   29 ++++
- src/sunxi_x_g2d.c |  413 ++++++++++++++++++++++++++++++++++++++++++++++++++---
+ src/sunxi_x_g2d.c |  411 ++++++++++++++++++++++++++++++++++++++++++++++++++---
  src/sunxi_x_g2d.h |    3 +-
- 5 files changed, 644 insertions(+), 21 deletions(-)
+ 5 files changed, 642 insertions(+), 21 deletions(-)
 
 diff --git a/src/fbdev.c b/src/fbdev.c
 index da54673..36ef523 100644
@@ -62,7 +62,7 @@ index da54673..36ef523 100644
  		}
  	}
 diff --git a/src/sunxi_disp.c b/src/sunxi_disp.c
-index 559598a..b17e628 100644
+index 559598a..0fcf66e 100644
 --- a/src/sunxi_disp.c
 +++ b/src/sunxi_disp.c
 @@ -27,6 +27,7 @@
@@ -300,7 +300,7 @@ index 559598a..b17e628 100644
 +    /*
 +     * If the area is smaller than G2D_BLT_SIZE_THRESHOLD, prefer to avoid the
 +     * overhead of G2D and do a CPU blit instead. There is a special threshold
-+     * for 16bpp to 16bpp copy .
++     * for 16bpp to 16bpp copy.
 +     */
 +    if (src_bpp == 16 && dst_bpp == 16)
 +        blt_size_threshold = G2D_BLT_SIZE_THRESHOLD_16BPP;
@@ -378,7 +378,7 @@ index dc3f304..f7cb2e0 100644
  int sunxi_g2d_blt(void               *disp,
                    uint32_t           *src_bits,
 diff --git a/src/sunxi_x_g2d.c b/src/sunxi_x_g2d.c
-index de91bbb..ba428ab 100644
+index de91bbb..73f01ef 100644
 --- a/src/sunxi_x_g2d.c
 +++ b/src/sunxi_x_g2d.c
 @@ -37,6 +37,9 @@
@@ -491,7 +491,7 @@ index de91bbb..ba428ab 100644
          pSrcDrawable->bitsPerPixel == pDstDrawable->bitsPerPixel &&
          (pSrcDrawable->bitsPerPixel == 32 || pSrcDrawable->bitsPerPixel == 16))
      {
-@@ -211,6 +220,365 @@ xCopyArea(DrawablePtr pSrcDrawable,
+@@ -211,6 +220,363 @@ xCopyArea(DrawablePtr pSrcDrawable,
                        xIn, yIn, widthSrc, heightSrc, xOut, yOut);
  }
  
@@ -796,8 +796,6 @@ index de91bbb..ba428ab 100644
 +        fbPutImage(pDrawable, pGC, depth, x, y, w, h, leftPad, format, pImage);
 +        return;
 +    }
-+    fbPutImage(pDrawable, pGC, depth, x, y, w, h, leftPad, format, pImage);
-+    return;
 +
 +    ScreenPtr pScreen = pDrawable->pScreen;
 +    ScrnInfoPtr pScrn = xf86Screens[pScreen->myNum];
@@ -857,7 +855,7 @@ index de91bbb..ba428ab 100644
  static Bool
  xCreateGC(GCPtr pGC)
  {
-@@ -228,6 +596,11 @@ xCreateGC(GCPtr pGC)
+@@ -228,6 +594,11 @@ xCreateGC(GCPtr pGC)
  
          /* Add our own hook for CopyArea function */
          self->pGCOps->CopyArea = xCopyArea;
@@ -869,16 +867,16 @@ index de91bbb..ba428ab 100644
      }
      pGC->ops = self->pGCOps;
  
-@@ -236,7 +609,7 @@ xCreateGC(GCPtr pGC)
+@@ -236,7 +607,7 @@ xCreateGC(GCPtr pGC)
  
  /*****************************************************************************/
  
 -SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d)
-+SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d, BOOL use_G2D)
++SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d, Bool use_G2D)
  {
      SunxiG2D *private = calloc(1, sizeof(SunxiG2D));
      if (!private) {
-@@ -257,6 +630,10 @@ SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d)
+@@ -257,6 +628,10 @@ SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d)
      private->CreateGC = pScreen->CreateGC;
      pScreen->CreateGC = xCreateGC;
  
@@ -890,7 +888,7 @@ index de91bbb..ba428ab 100644
  }
  
 diff --git a/src/sunxi_x_g2d.h b/src/sunxi_x_g2d.h
-index d58e25d..c59be43 100644
+index d58e25d..048b5b4 100644
 --- a/src/sunxi_x_g2d.h
 +++ b/src/sunxi_x_g2d.h
 @@ -47,9 +47,10 @@ typedef struct {
@@ -901,7 +899,7 @@ index d58e25d..c59be43 100644
  } SunxiG2D;
  
 -SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d);
-+SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d, BOOL use_G2D);
++SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d, Bool use_G2D);
  void SunxiG2D_Close(ScreenPtr pScreen);
  
  #endif
