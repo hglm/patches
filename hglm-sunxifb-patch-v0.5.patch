@@ -1,26 +1,31 @@
-From 50474e62a941081e28b5749954d33ce89e9e3a2f Mon Sep 17 00:00:00 2001
+From 7beb7fc414996df78a8b4f0a466cfb48071c3f2a Mon Sep 17 00:00:00 2001
 From: hglm <synapsid_on_si@yahoo.com>
-Date: Tue, 21 May 2013 20:16:58 +0200
-Subject: [PATCH] Implement G2D FillRect and G2D blit improvements
+Date: Thu, 23 May 2013 23:15:12 +0200
+Subject: [PATCH] Implement G2D FillRect and G2D blit improvements, and
+ optimize PutImage
 
 1. Implement an area threshold for using G2D blits in sunxi_disp.c,
-   currently set to 200.
+   currently set to 200 for 32bpp, 1000 for 16bpp.
 2. In xCopyNToN, it is guaranteed that alu == GXcopy and planemask
    == FB_ALL_ONES, so no need to check for them.
 3. Implement xPolyFillRect. Only the case of a drawable window, fill
    style of FillSolid, effective alu type of GXcopy, and plane mask
    of all ones is accelerated with G2D. Only uses G2D for fills of
-   1000 pixels or larger in area (5000 for 16bpp). Two implementations
+   10000 pixels or larger in area (50000 for 16bpp). Two implementations
    of PolyFillRect are provided, one based on fbPolyFillRect and the
-   other on exaPolyFillRect.
+   other on exaPolyFillRect. The EXA-style implementation shows an
+   improvement when running x11perf -rect100.
 4. Add support for 16-bit fill to sunxi_disp.c and provide a 16-bit
    fill_in_three function to fill in three segments using 32-bit
    format for the middle segment.
-5. Add the hook for xPolyFillRect to xCreateGC.
-6. Add use_G2D flag to SunxiG2D struct that indicates whether G2D
+5. Add an optimized PutImage. This does not use G2D, but shows a clear
+   improvement in some off-screen to screen blits by using pixman
+   instead of the default Xorg fb implementation.
+6. Add the hook for xPolyFillRect and xPutimage to xCreateGC.
+7. Add use_G2D flag to SunxiG2D struct that indicates whether G2D
    acceleration is enabled. This flag is used to determine whether
    G2D FillRect should be used.
-7. Implement "double speed" 16bpp blits. When source and
+8. Implement "double speed" 16bpp blits. When source and
    destination coordinates allow it, the blit is divided into up
    to three segments with the aligned middle segment being copied in
    32bpp mode.
@@ -28,11 +33,11 @@ Subject: [PATCH] Implement G2D FillRect and G2D blit improvements
 Signed-off-by: hglm <synapsid_on_si@yahoo.com>
 ---
  src/fbdev.c       |    4 +-
- src/sunxi_disp.c  |  208 ++++++++++++++++++++++++++++++++++
- src/sunxi_disp.h  |   25 +++++
- src/sunxi_x_g2d.c |  320 ++++++++++++++++++++++++++++++++++++++++++++++++++---
+ src/sunxi_disp.c  |  216 ++++++++++++++++++++++++++++
+ src/sunxi_disp.h  |   29 ++++
+ src/sunxi_x_g2d.c |  413 ++++++++++++++++++++++++++++++++++++++++++++++++++---
  src/sunxi_x_g2d.h |    3 +-
- 5 files changed, 539 insertions(+), 21 deletions(-)
+ 5 files changed, 644 insertions(+), 21 deletions(-)
 
 diff --git a/src/fbdev.c b/src/fbdev.c
 index da54673..36ef523 100644
@@ -57,16 +62,25 @@ index da54673..36ef523 100644
  		}
  	}
 diff --git a/src/sunxi_disp.c b/src/sunxi_disp.c
-index 559598a..997bd40 100644
+index 559598a..b17e628 100644
 --- a/src/sunxi_disp.c
 +++ b/src/sunxi_disp.c
-@@ -427,6 +427,109 @@ int sunxi_g2d_fill_a8r8g8b8(sunxi_disp_t *disp,
+@@ -27,6 +27,7 @@
+ #include <unistd.h>
+ #include <string.h>
+ #include <stdlib.h>
++#include <stdio.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+ 
+@@ -427,6 +428,116 @@ int sunxi_g2d_fill_a8r8g8b8(sunxi_disp_t *disp,
      return ioctl(disp->fd_g2d, G2D_CMD_FILLRECT, &tmp);
  }
  
 +/*
 + * 16-bit fill is slower than software fill, but for completeness it is
 + * implemented here. It does help CPU utilization.
++ * color is a 16-bit R5G6B5 value.
 + */
 +
 +int sunxi_g2d_fill_r5g6b5(sunxi_disp_t *disp,
@@ -94,7 +108,9 @@ index 559598a..997bd40 100644
 +    tmp.dst_rect.y          = y;
 +    tmp.dst_rect.w          = w;
 +    tmp.dst_rect.h          = h;
-+    tmp.color               = color;
++    /* We have to convert the color to RGB888 format. */
++    tmp.color               = ((color & 0x001F) << 3) | ((color & 0x07E0) << 5) |
++                              ((color & 0xF800) << 8);
 +    tmp.alpha               = 0;
 +
 +    return ioctl(disp->fd_g2d, G2D_CMD_FILLRECT, &tmp);
@@ -114,6 +130,7 @@ index 559598a..997bd40 100644
 +                            uint32_t      color)
 +{
 +    g2d_fillrect tmp;
++    uint32_t color_rgb888;
 +
 +    if (disp->fd_g2d < 0)
 +        return -1;
@@ -129,13 +146,16 @@ index 559598a..997bd40 100644
 +    tmp.dst_rect.h          = h;
 +    tmp.alpha               = 0;
 +
++    color_rgb888 = ((color & 0x001F) << 3) | ((color & 0x07E0) << 5) |
++                   ((color & 0xF800) << 8);
++
 +    if (x & 1) {
 +        tmp.dst_image.w         = disp->xres;
 +        tmp.dst_image.format    = G2D_FMT_RGB565;
 +        tmp.dst_image.pixel_seq = G2D_SEQ_P10;
 +        tmp.dst_rect.x          = x;
 +        tmp.dst_rect.w          = 1;
-+        tmp.color               = color;
++        tmp.color               = color_rgb888;
 +        if (ioctl(disp->fd_g2d, G2D_CMD_FILLRECT, &tmp))
 +            return - 1;
 +        x++;
@@ -159,7 +179,7 @@ index 559598a..997bd40 100644
 +        tmp.dst_image.pixel_seq = G2D_SEQ_P10;
 +        tmp.dst_rect.x          = x;
 +        tmp.dst_rect.w          = 1;
-+        tmp.color               = color;
++        tmp.color               = color_rgb888;
 +        if (ioctl(disp->fd_g2d, G2D_CMD_FILLRECT, &tmp))
 +            return - 1;
 +    }
@@ -170,7 +190,7 @@ index 559598a..997bd40 100644
  int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
                              int           dst_x,
                              int           dst_y,
-@@ -467,6 +570,94 @@ int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
+@@ -467,6 +578,94 @@ int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
  }
  
  /*
@@ -265,7 +285,7 @@ index 559598a..997bd40 100644
   * G2D counterpart for pixman_blt (function arguments are the same with
   * only sunxi_disp_t extra argument added). Supports 16bpp (r5g6b5) and
   * 32bpp (a8r8g8b8) formats and also conversion between them.
-@@ -489,6 +680,7 @@ int sunxi_g2d_blt(void               *self,
+@@ -489,6 +688,7 @@ int sunxi_g2d_blt(void               *self,
                    int                 h)
  {
      sunxi_disp_t *disp = (sunxi_disp_t *)self;
@@ -273,7 +293,7 @@ index 559598a..997bd40 100644
      g2d_blt tmp;
      /*
       * Very minimal validation here. We just assume that if the begginging
-@@ -505,6 +697,18 @@ int sunxi_g2d_blt(void               *self,
+@@ -505,6 +705,18 @@ int sunxi_g2d_blt(void               *self,
          return 0;
      }
  
@@ -292,7 +312,7 @@ index 559598a..997bd40 100644
      if (w <= 0 || h <= 0)
          return 1;
  
-@@ -515,6 +719,10 @@ int sunxi_g2d_blt(void               *self,
+@@ -515,6 +727,10 @@ int sunxi_g2d_blt(void               *self,
      if (disp->fd_g2d < 0)
          return 0;
  
@@ -304,7 +324,7 @@ index 559598a..997bd40 100644
          return 0;
  
 diff --git a/src/sunxi_disp.h b/src/sunxi_disp.h
-index dc3f304..72cda39 100644
+index dc3f304..f7cb2e0 100644
 --- a/src/sunxi_disp.h
 +++ b/src/sunxi_disp.h
 @@ -103,6 +103,11 @@ int sunxi_wait_for_vsync(sunxi_disp_t *ctx);
@@ -313,8 +333,8 @@ index dc3f304..72cda39 100644
  
 +/* The following constants are used in sunxi_x_g2d.c and represent */
 +/* the area threshold for falling back to CPU fill. */
-+#define G2D_FILL_SIZE_THRESHOLD_32BPP 1000
-+#define G2D_FILL_SIZE_THRESHOLD_16BPP 5000
++#define G2D_FILL_SIZE_THRESHOLD_32BPP 10000
++#define G2D_FILL_SIZE_THRESHOLD_16BPP 50000
 +
  int sunxi_g2d_fill_a8r8g8b8(sunxi_disp_t *disp,
                              int           x,
@@ -340,10 +360,14 @@ index dc3f304..72cda39 100644
  int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
                              int           dst_x,
                              int           dst_y,
-@@ -118,6 +137,12 @@ int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
+@@ -118,6 +137,16 @@ int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
                              int           w,
                              int           h);
  
++int sunxi_g2d_blit_r5g6b5_in_three(sunxi_disp_t *disp, uint8_t *src_bits,
++    uint8_t *dst_bits, int src_stride, int dst_stride, int src_x, int src_y,
++    int dst_x, int dst_y, int w, int h);
++
 +/* The following constant is used sunxi_disp.c and represents */
 +/* the area threshold below which the sunxi_g2d_blit function will */
 +/* return 0, indicating that a software blit is preferred. */
@@ -354,7 +378,7 @@ index dc3f304..72cda39 100644
  int sunxi_g2d_blt(void               *disp,
                    uint32_t           *src_bits,
 diff --git a/src/sunxi_x_g2d.c b/src/sunxi_x_g2d.c
-index de91bbb..749cae1 100644
+index de91bbb..ba428ab 100644
 --- a/src/sunxi_x_g2d.c
 +++ b/src/sunxi_x_g2d.c
 @@ -37,6 +37,9 @@
@@ -372,7 +396,7 @@ index de91bbb..749cae1 100644
  
      while (nbox--) {
 -        if (!private->blt2d_overlapped_blt(private->blt2d_self,
-+        BOOL done = FALSE;
++        Bool done = FALSE;
 +        int w = pbox->x2 - pbox->x1;
 +        int h = pbox->y2 - pbox->y1;
 +        done = private->blt2d_overlapped_blt(private->blt2d_self,
@@ -467,7 +491,7 @@ index de91bbb..749cae1 100644
          pSrcDrawable->bitsPerPixel == pDstDrawable->bitsPerPixel &&
          (pSrcDrawable->bitsPerPixel == 32 || pSrcDrawable->bitsPerPixel == 16))
      {
-@@ -211,6 +220,274 @@ xCopyArea(DrawablePtr pSrcDrawable,
+@@ -211,6 +220,365 @@ xCopyArea(DrawablePtr pSrcDrawable,
                        xIn, yIn, widthSrc, heightSrc, xOut, yOut);
  }
  
@@ -497,7 +521,7 @@ index de91bbb..749cae1 100644
 +    int xorg, yorg;
 +    FbGCPrivPtr pPriv;
 +    int fill_size_threshold;
-+    BOOL fallback;
++    Bool fallback;
 +    fallback = FALSE;
 +    pPriv = fbGetGCPrivate(pGC);
 +    if (pDrawable->type != DRAWABLE_WINDOW || pGC->fillStyle != FillSolid)
@@ -523,8 +547,8 @@ index de91bbb..749cae1 100644
 +    // It turns out we get here not only for framebuffer destinations, so
 +    // we have to check whether the destination is inside the framebuffer,
 +    // otherwise fall back to CPU fill.
-+    if ((uint8_t *)dst - disp->framebuffer_addr < 0 || (uint8_t *)dst - disp->framebuffer_addr
-+    >= disp->framebuffer_size) {
++    if ((uint8_t *)dst < disp->framebuffer_addr || (uint8_t *)dst >= disp->framebuffer_addr
++    + disp->framebuffer_size) {
 +        fbPolyFillRect(pDrawable, pGC, nrect, prect);
 +        return;
 +    }
@@ -574,15 +598,16 @@ index de91bbb..749cae1 100644
 +            h = fullY2 - fullY1;
 +            if (!pPriv->and && w * h >= fill_size_threshold) {
 +                /* We have to convert the destination address to pixel coordinates. */
-+                int framebuffer_offset = ((uint8_t *)dst - disp->framebuffer_addr);
-+                int screeny = framebuffer_offset / dstStride;
++                int framebuffer_offset = (uint32_t)dst - (uint32_t)disp->framebuffer_addr;
++                int screeny = framebuffer_offset / (dstStride * 4);
 +                if (dstBpp == 32) {
-+                    int screenx = (framebuffer_offset % dstStride) >> 2;
++                    int screenx = (framebuffer_offset % (dstStride * 4)) >> 2;
 +                    sunxi_g2d_fill_a8r8g8b8(disp, x + screenx, y + screeny, w, h, pPriv->xor);
 +                }
 +                else {
-+                    int screenx = (framebuffer_offset % dstStride) >> 1;
-+                    sunxi_g2d_fill_r5g6b5_in_three(disp, x + screenx, y + screeny, w, h, pPriv->xor);
++                    int screenx = (framebuffer_offset % (dstStride * 4)) >> 1;
++                    sunxi_g2d_fill_r5g6b5_in_three(disp, x + screenx, y + screeny, w, h,
++                        pPriv->xor & 0xFFFF);
 +                }
 +            }
 +            else {
@@ -621,15 +646,16 @@ index de91bbb..749cae1 100644
 +                    w = partX2 - partX1;
 +                    h = partY2 - partY1;
 +                    if (!pPriv->and && w * h >= fill_size_threshold) {
-+                        int framebuffer_offset = ((uint8_t *)dst - disp->framebuffer_addr);
-+                        int screeny = framebuffer_offset / dstStride;
++                        int framebuffer_offset = (uint32_t)dst - (uint32_t)disp->framebuffer_addr;
++                        int screeny = framebuffer_offset / (dstStride * 4);
 +                        if (dstBpp == 32) {
-+                            int screenx = (framebuffer_offset % dstStride) >> 2;
++                            int screenx = (framebuffer_offset % (dstStride * 4)) >> 2;
 +                            sunxi_g2d_fill_a8r8g8b8(disp, x + screenx, y + screeny, w, h, pPriv->xor);
 +                        }
 +                        else {
-+                            int screenx = (framebuffer_offset % dstStride) >> 1;
-+                            sunxi_g2d_fill_r5g6b5_in_three(disp, x + screenx, y + screeny, w, h, pPriv->xor);
++                            int screenx = (framebuffer_offset % (dstStride * 4)) >> 1;
++                            sunxi_g2d_fill_r5g6b5_in_three(disp, x + screenx, y + screeny, w, h,
++                                pPriv->xor & 0xFFFF);
 +                        }
 +                    }
 +                    else {
@@ -649,15 +675,15 @@ index de91bbb..749cae1 100644
 +
 +static void G2DFillRect(sunxi_disp_t *disp, FbBits *dst, int dstStride, int dstBpp, int x, int y, int w, int h, Pixel pixel) {
 +    /* We have to convert the destination address to pixel coordinates. */
-+    int framebuffer_offset = ((uint8_t *)dst - disp->framebuffer_addr);
-+    int screeny = framebuffer_offset / dstStride;
++    int framebuffer_offset = (uint32_t)dst - (uint32_t)disp->framebuffer_addr;
++    int screeny = framebuffer_offset / (dstStride * 4);
 +    if (dstBpp == 32) {
-+        int screenx = (framebuffer_offset % dstStride) >> 2;
++        int screenx = (framebuffer_offset % (dstStride * 4)) >> 2;
 +        sunxi_g2d_fill_a8r8g8b8(disp, x + screenx, y + screeny, w, h, pixel);
 +    }
 +    else {
-+        int screenx = (framebuffer_offset % dstStride) >> 1;
-+        sunxi_g2d_fill_r5g6b5_in_three(disp, x + screenx, y + screeny, w, h, pixel);
++        int screenx = (framebuffer_offset % (dstStride * 4)) >> 1;
++        sunxi_g2d_fill_r5g6b5_in_three(disp, x + screenx, y + screeny, w, h, pixel & 0xFFFF);
 +    }
 +}
 +
@@ -718,7 +744,10 @@ index de91bbb..749cae1 100644
 +     * For ROPs where overlaps don't matter, convert rectangles to region and
 +     * call xFillRegionSolid.
 +     */
-+    if (pDrawable->type == DRAWABLE_WINDOW && pGC->fillStyle == FillSolid && pPriv->pm == FB_ALLONES && !pPriv->and) {
++    if (pDrawable->type == DRAWABLE_WINDOW && pGC->fillStyle == FillSolid && pPriv->pm == FB_ALLONES &&
++    !pPriv->and &&
++    (nrect == 1 || pGC->alu == GXcopy || pGC->alu == GXclear || pGC->alu == GXnoop ||
++    pGC->alu == GXcopyInverted || pGC->alu == GXset)) {
 +        RegionPtr pClip = fbGetCompositeClip(pGC);
 +        RegionPtr pReg = pReg = RegionFromRects(nrect, prect, CT_UNSORTED);
 +        /* Compute intersection of rects and clip region */
@@ -729,30 +758,118 @@ index de91bbb..749cae1 100644
 +        RegionUninit(pReg);
 +        RegionDestroy(pReg);
 +    }
-+    else {
++    else
 +        // Fall back.
 +        fbPolyFillRect(pDrawable, pGC, nrect, prect);
-+        return;
-+    }
 +}
 +
 +#endif
++
++/* Adapted from fbPutImage.c. */
++
++void xPutImage(DrawablePtr pDrawable,
++           GCPtr pGC,
++           int depth,
++           int x, int y, int w, int h, int leftPad, int format, char *pImage)
++{
++    FbGCPrivPtr pPriv;
++
++    FbStride srcStride;
++    FbStip *src;
++    RegionPtr pClip;
++    FbStip *dst;
++    FbStride dstStride;
++    int dstBpp;
++    int dstXoff, dstYoff;
++    int nbox;
++    BoxPtr pbox;
++    int x1, y1, x2, y2;
++
++    if (format == XYBitmap || format == XYPixmap ||
++    pDrawable->bitsPerPixel != BitsPerPixel(pDrawable->depth)) {
++        fbPutImage(pDrawable, pGC, depth, x, y, w, h, leftPad, format, pImage);
++        return;
++    }
++
++    pPriv =fbGetGCPrivate(pGC);
++    if (pPriv->pm != FB_ALLONES || pGC->alu != GXcopy) {
++        fbPutImage(pDrawable, pGC, depth, x, y, w, h, leftPad, format, pImage);
++        return;
++    }
++    fbPutImage(pDrawable, pGC, depth, x, y, w, h, leftPad, format, pImage);
++    return;
++
++    ScreenPtr pScreen = pDrawable->pScreen;
++    ScrnInfoPtr pScrn = xf86Screens[pScreen->myNum];
++    SunxiG2D *private = SUNXI_G2D(pScrn);
++
++    src = (FbStip *)pImage;
++
++    x += pDrawable->x;
++    y += pDrawable->y;
++
++    srcStride = PixmapBytePad(w, pDrawable->depth) / sizeof(FbStip);
++    pClip = fbGetCompositeClip(pGC);
++
++    fbGetStipDrawable(pDrawable, dst, dstStride, dstBpp, dstXoff, dstYoff); 
++
++    for (nbox = RegionNumRects(pClip),
++        pbox = RegionRects(pClip); nbox--; pbox++) {
++        x1 = x;
++        y1 = y;
++        x2 = x + w;
++        y2 = y + h;
++        if (x1 < pbox->x1)
++            x1 = pbox->x1;
++        if (y1 < pbox->y1)
++            y1 = pbox->y1;
++        if (x2 > pbox->x2)
++            x2 = pbox->x2;
++        if (y2 > pbox->y2)
++            y2 = pbox->y2;
++        if (x1 >= x2 || y1 >= y2)
++            continue;
++        Bool done = FALSE;
++        int w = x2 - x1;
++        int h = y2 - y1;
++        /* first try pixman (NEON) */
++        if (!done) {
++            done = pixman_blt((uint32_t *)src, (uint32_t *)dst, srcStride, dstStride,
++                 dstBpp, dstBpp, x1 - x,
++                 y1 - y, x1 + dstXoff,
++                 y1 + dstYoff, w,
++                 h);
++        }
++        if (!done)
++            fbBlt(src + (y1 - y) * srcStride,
++                  srcStride,
++                  (x1 - x) * dstBpp,
++                  dst + (y1 + dstYoff) * dstStride,
++                  dstStride,
++                  (x1 + dstXoff) * dstBpp,
++                  w * dstBpp,
++                  h, GXcopy, FB_ALLONES, dstBpp, FALSE, FALSE);
++    }
++    fbFinishAccess(pDrawable);
++}
 +
 +
  static Bool
  xCreateGC(GCPtr pGC)
  {
-@@ -228,6 +505,9 @@ xCreateGC(GCPtr pGC)
+@@ -228,6 +596,11 @@ xCreateGC(GCPtr pGC)
  
          /* Add our own hook for CopyArea function */
          self->pGCOps->CopyArea = xCopyArea;
 +        if (self->use_G2D)
 +            /* Add our own hook for PolyFillRect */
 +            self->pGCOps->PolyFillRect = xPolyFillRect;
++        /* Add our own hook for PutImage */
++        self->pGCOps->PutImage = xPutImage;
      }
      pGC->ops = self->pGCOps;
  
-@@ -236,7 +516,7 @@ xCreateGC(GCPtr pGC)
+@@ -236,7 +609,7 @@ xCreateGC(GCPtr pGC)
  
  /*****************************************************************************/
  
@@ -761,7 +878,7 @@ index de91bbb..749cae1 100644
  {
      SunxiG2D *private = calloc(1, sizeof(SunxiG2D));
      if (!private) {
-@@ -257,6 +537,10 @@ SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d)
+@@ -257,6 +630,10 @@ SunxiG2D *SunxiG2D_Init(ScreenPtr pScreen, blt2d_i *blt2d)
      private->CreateGC = pScreen->CreateGC;
      pScreen->CreateGC = xCreateGC;
  
