@@ -1,0 +1,96 @@
+Running x11perf on a device with 408 MHz memory clock.
+ShadowFB disabled in tests with patch.
+
+G2D FillRect performance:
+
+1920x1080x32bpp@60Hz
+
+                  rect10   rect100   rect500
+G2D sunxifb       987000   18300     775
+fb-style fill     994000   11800     684
+EXA-style fill    764000   16900     682
+
+With kernel compile in background:
+                  rect10   rect100   rect500
+G2D sunxifb       448000    8990     381
+G2D fb-style fill 459000   10700     640
+
+Running a CPU-intensive benchmark with x11perf -rect500 running concurrently:
+
+                         user  real
+G2D sunxifb              20.2  40.6
+G2D fb-style fill        21.1  22.4
+
+At 32bpp the patch slightly decreases Fill throughput on an idle
+system when EXA-style fill is used. On a system with load, the greatly reduced
+CPU utilization results in both higher fill throughput and faster execution
+of the background processes.
+
+1920x1080x16bpp@60Hz
+
+                  rect10   rect100   rect500
+G2D sunxifb       916000   44400     2140
+fb-style fill    1030000   44600     1300
+EXA-style fill    985000             1290
+
+At 16bpp, fill throughput with the patch when G2D fill is triggered (rect500)
+is lower than CPU fill. On a system with load, the G2D fill should close the gap
+somewhat.
+
+G2D CopyArea performance:
+
+1920x1080x32bpp@60Hz
+
+                  scroll10 scroll100 scroll500 copywin10 copywin100 copywin500
+G2D sunxifb       39200    8110      477       41600     8230       571
+G2D with patch    87100    8110      478       55400     8220       570
+
+Using software blit instead of G2D for small sizes improves performance.
+
+1920x1080x16bpp@60Hz
+
+                  scroll10 scroll100 scroll500 copywin10 copywin100 copywin500
+G2D sunxifb                11000     738                 10900      734
+G2D with patch    92000    12200     1240      67500     12000      887
+
+Using "double-speed" blits at 16bpp using 32bpp mode increases throughput,
+especially for large areas.
+
+G2D PutImage performance. Because x11perf -shmput triggers the CopyArea path
+instead of the PutImage path, we use benchimagemark:
+
+1920x1080, 60 Hz
+
+512x512, Mpix/s
+                           XPutImage XShmPutImage Pixmap SHM
+16bpp, non optimized       16.90     33.28        53.38
+16bpp, optimized PutImage  18.46     51.11        51.00
+32bpp, non optimized       14.57     27.84        40.03
+32bpp, optimized PutImage  17.77     40.22        40.76
+
+200x200
+
+16bpp, non-optimized       19.35     28.38        36.60
+16bpp, optimized PutImage  17.08     38.30        40.43
+32bpp, non-optimized       13.46     25.59        33.23
+32bpp, optimized PutImage  15.36     34.04        34.34
+
+1280x720, 60 Hz
+
+512x512
+
+16bpp, non-optimized       16.89     34.51        57.95
+16bpp, optimized PutImage  21.30     57.50        57.52
+32bpp, non-optimized       14.80     26.79        35.14*
+32bpp, optimized PutImage  19.72     47.17        47.30
+
+* Anomalous value, probably a typo.
+
+200x200
+
+16bpp, non-optimized       16.71     29.76        42.26
+16bpp, optimized Putimage  19.59     39.71        39.86
+
+XPutImage and especially XShmPutImage is clearly higher with
+the optimized PutImage implementation using pixman. The newer
+Xorg shared memory pixmaps are not affected.
