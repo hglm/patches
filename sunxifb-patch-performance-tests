@@ -118,3 +118,4 @@ higher with the optimized PutImage implementation using
 pixman. The difference is even more pronounced when the off
 screen area isn't filled every iteration. Shared memory
 pixmaps are not affected.
+

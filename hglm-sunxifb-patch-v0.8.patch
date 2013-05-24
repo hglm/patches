@@ -1,6 +1,6 @@
-From 1c3e3b145ec6d59559bdd7a2f1c1ba1ef831b75e Mon Sep 17 00:00:00 2001
+From 1b482ef05aa4d0e997ded2de8408a48b5abbabd2 Mon Sep 17 00:00:00 2001
 From: hglm <synapsid_on_si@yahoo.com>
-Date: Fri, 24 May 2013 09:32:18 +0200
+Date: Fri, 24 May 2013 15:32:00 +0200
 Subject: [PATCH] Implement G2D FillRect and G2D blit improvements, and
  optimize PutImage
 
@@ -62,7 +62,7 @@ index da54673..36ef523 100644
  		}
  	}
 diff --git a/src/sunxi_disp.c b/src/sunxi_disp.c
-index 559598a..e20d806 100644
+index 559598a..9c6bccd 100644
 --- a/src/sunxi_disp.c
 +++ b/src/sunxi_disp.c
 @@ -427,6 +427,116 @@ int sunxi_g2d_fill_a8r8g8b8(sunxi_disp_t *disp,
@@ -312,7 +312,7 @@ index 559598a..e20d806 100644
 +    if (src_bpp == 16 && dst_bpp == 16 && (src_x & 1) == (dst_x & 1))
 +        /* Check whether the overlapping type is supported, the condition */
 +        /* is slightly different compared to the regular blit. */
-+        if (src_bits == dst_bits && src_y == dst_y && src_x < dst_x)
++        if (src_bits == dst_bits && src_y == dst_y && src_x + 2 < dst_x)
 +            return sunxi_g2d_blit_r5g6b5_in_three(disp, (uint8_t *)src_bits, (uint8_t *)dst_bits,
 +                src_stride, dst_stride, src_x, src_y, dst_x, dst_y, w, h);
 +

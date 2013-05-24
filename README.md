@@ -3,6 +3,11 @@ Miscellaneous patches.
 hglm-sunxifb-patch-v0.7.patch is a patch for the sunxifb driver that implements a
 number of possible performance improvements.
 
+Changes in v0.8:
+
+- Fix constraint for 16bpp blit in 32-bit mode which could potentially cause
+  stability problems.
+
 Changes in v0.7:
 
 - Get rid of DRAWABLE_WINDOW checks; also handle off-screen cases for the drawing
