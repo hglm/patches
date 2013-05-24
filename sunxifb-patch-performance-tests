@@ -5,15 +5,15 @@ G2D FillRect performance:
 
 1920x1080x32bpp@60Hz
 
-                  rect10   rect100   rect500
-G2D sunxifb       987000   18300     775
-fb-style fill     994000   11800     684
-EXA-style fill    764000   16900     682
+                   rect10   rect100   rect500
+G2D sunxifb        987000   18300     775
+G2D fb-style fill  994000   11800     684
+G2D EXA-style fill 764000   16900     682
 
 With kernel compile in background:
-                  rect10   rect100   rect500
-G2D sunxifb       448000    8990     381
-G2D fb-style fill 459000   10700     640
+                   rect10   rect100   rect500
+G2D sunxifb        448000    8990     381
+G2D fb-style fill  459000   10700     640
 
 Running a CPU-intensive benchmark with x11perf -rect500 running concurrently:
 
@@ -31,11 +31,12 @@ of the background processes.
                   rect10   rect100   rect500
 G2D sunxifb       916000   44400     2140
 fb-style fill    1030000   44600     1300
-EXA-style fill    985000             1290
+EXA-style fill    985000   63700     1290
 
 At 16bpp, fill throughput with the patch when G2D fill is triggered (rect500)
 is lower than CPU fill. On a system with load, the G2D fill should close the gap
-somewhat.
+somewhat. For rect100 EXA performance using CPU (pixman) is higher due to the
+overlapping region optimization that the EXA-style implementation performs.
 
 G2D CopyArea performance:
 
@@ -81,16 +82,17 @@ instead of the PutImage path, we use benchimagemark:
 
 16bpp, non-optimized       16.89     34.51        57.95
 16bpp, optimized PutImage  21.30     57.50        57.52
-32bpp, non-optimized       14.80     26.79        35.14*
-32bpp, optimized PutImage  19.72     47.17        47.30
+32bpp, non-optimized       16.36     31.68        50.13
+32bpp, optimized PutImage  19.28     50.67        50.81
 
-* Anomalous value, probably a typo.
 
 200x200
 
 16bpp, non-optimized       16.71     29.76        42.26
-16bpp, optimized Putimage  19.59     39.71        39.86
+16bpp, optimized PutImage  19.59     39.71        39.86
+32bpp, non-optimized       15.03     28.19        38.78
+32bpp, optimized PutImage  24.22     35.64        36.31
 
-XPutImage and especially XShmPutImage is clearly higher with
-the optimized PutImage implementation using pixman. The newer
-Xorg shared memory pixmaps are not affected.
+XPutImage and especially XShmPutImage throughput is clearly
+higher with the optimized PutImage implementation using
+pixman. Shared memory pixmaps are not affected.
