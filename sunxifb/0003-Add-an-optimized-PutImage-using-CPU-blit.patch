@@ -1,0 +1,178 @@
+From c97dce878845d7b7fbc917a82af6524e713c0aa8 Mon Sep 17 00:00:00 2001
+From: Harm Hanemaaijer <fgenfb@yahoo.com>
+Date: Fri, 24 May 2013 19:13:13 +0200
+Subject: [PATCH 3/5] Add an optimized PutImage using CPU blit
+
+Modern applications often write into an off-screen pixmap or
+image that is regularly transferred to the screen window.
+Depending on the method used, it appears that the code paths
+used by the Xorg fb driver for this purpose may not always be
+optimal. This is especially true if the ShmPutImage method is
+used, and to lesser extent for normal (piped) PutImage. The
+newer shared memory pixmap type is not affected and seems to
+be already optimized.
+
+Looking a the Xorg ShmPutImage implementation, it may use
+either CopyArea (which is optimized in the sunxifb driver) or
+PutImage. Running x11perf -shmput500 triggers the CopyArea
+path so it does not show the weakness. However, it appears
+that the PutImage path is regularly used by applications in
+practice.
+
+This implementation does not use G2D, so should be usable on
+different platforms. It shows a clear improvement in certain
+off-screen to screen blits by using pixman instead of the
+default Xorg fb implementation.
+
+Using a slightly modified version
+(https://github.com/hglm/patches/benchimagemark.tar.gz) of
+a program I found on the web that repeatedly writes into an
+image and transfers it to the screen, here are some benchmarks:
+
+benchimagemark512 at 1920x0180x32bppx60Hz:
+
+Before:
+
+1: XPutImage(XImage): 34.548875755 (14.47 Mpix/s)
+2: XPutImage(XImage): Pixmap, XCopyArea(Pixmap): 37.251380690 (13.42 Mpix/s)
+3: XPutImage(XImage): Pixmap, XRenderComposite(Pixmap): 37.170898615 (13.45 Mpix/s)
+4: XShmPutImage(XImage SHM): 18.167374795 (27.52 Mpix/s)
+5: XShmPutImage(XImage SHM): Pixmap, XCopyArea(Pixmap): 23.045493400 (21.70 Mpix/s)
+6: XShmPutImage(XImage SHM): Pixmap, XRenderComposite(Pixmap): 23.069486572 (21.67 Mpix/s)
+7: XCopyArea(Pixmap SHM): 12.920413918 (38.70 Mpix/s)
+8: XRenderComposite(Pixmap SHM): 12.972882531 (38.54 Mpix/s)
+
+After:
+
+1: XPutImage(XImage): 29.952659937 (16.69 Mpix/s)
+2: XPutImage(XImage): Pixmap, XCopyArea(Pixmap): 33.122204665 (15.10 Mpix/s)
+3: XPutImage(XImage): Pixmap, XRenderComposite(Pixmap): 32.846011813 (15.22 Mpix/s)
+4: XShmPutImage(XImage SHM): 13.359728942 (37.43 Mpix/s)
+5: XShmPutImage(XImage SHM): Pixmap, XCopyArea(Pixmap): 17.665096856 (28.30 Mpix/s)
+6: XShmPutImage(XImage SHM): Pixmap, XRenderComposite(Pixmap): 17.660086501 (28.31 Mpix/s)
+7: XCopyArea(Pixmap SHM): 13.310822346 (37.56 Mpix/s)
+8: XRenderComposite(Pixmap SHM): 13.360211359 (37.42 Mpix/s)
+
+At lower resolutions and lower color depth the improvement is
+greater. The improvement also get bigger when benchimagemark is
+configured not to fill the off-screen area each iteration. For
+example, at 1280x720x16bppx60Hz ShmPutImage throughput improves
+from 39 to 70 Mpix/s in this configuration.
+
+Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
+---
+ src/sunxi_x_g2d.c |   91 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 91 insertions(+)
+
+diff --git a/src/sunxi_x_g2d.c b/src/sunxi_x_g2d.c
+index a13b0a1..41d83f7 100644
+--- a/src/sunxi_x_g2d.c
++++ b/src/sunxi_x_g2d.c
+@@ -211,6 +211,95 @@ xCopyArea(DrawablePtr pSrcDrawable,
+                       xIn, yIn, widthSrc, heightSrc, xOut, yOut);
+ }
+ 
++/*
++ * The following function is adapted from xserver/fb/fbPutImage.c.
++ */
++
++void xPutImage(DrawablePtr pDrawable,
++           GCPtr pGC,
++           int depth,
++           int x, int y, int w, int h, int leftPad, int format, char *pImage)
++{
++    FbGCPrivPtr pPriv;
++
++    FbStride srcStride;
++    FbStip *src;
++    RegionPtr pClip;
++    FbStip *dst;
++    FbStride dstStride;
++    int dstBpp;
++    int dstXoff, dstYoff;
++    int nbox;
++    BoxPtr pbox;
++    int x1, y1, x2, y2;
++
++    if (format == XYBitmap || format == XYPixmap ||
++    pDrawable->bitsPerPixel != BitsPerPixel(pDrawable->depth)) {
++        fbPutImage(pDrawable, pGC, depth, x, y, w, h, leftPad, format, pImage);
++        return;
++    }
++
++    pPriv =fbGetGCPrivate(pGC);
++    if (pPriv->pm != FB_ALLONES || pGC->alu != GXcopy) {
++        fbPutImage(pDrawable, pGC, depth, x, y, w, h, leftPad, format, pImage);
++        return;
++    }
++
++    ScreenPtr pScreen = pDrawable->pScreen;
++    ScrnInfoPtr pScrn = xf86Screens[pScreen->myNum];
++    SunxiG2D *private = SUNXI_G2D(pScrn);
++
++    src = (FbStip *)pImage;
++
++    x += pDrawable->x;
++    y += pDrawable->y;
++
++    srcStride = PixmapBytePad(w, pDrawable->depth) / sizeof(FbStip);
++    pClip = fbGetCompositeClip(pGC);
++
++    fbGetStipDrawable(pDrawable, dst, dstStride, dstBpp, dstXoff, dstYoff);
++
++    for (nbox = RegionNumRects(pClip),
++        pbox = RegionRects(pClip); nbox--; pbox++) {
++        x1 = x;
++        y1 = y;
++        x2 = x + w;
++        y2 = y + h;
++        if (x1 < pbox->x1)
++            x1 = pbox->x1;
++        if (y1 < pbox->y1)
++            y1 = pbox->y1;
++        if (x2 > pbox->x2)
++            x2 = pbox->x2;
++        if (y2 > pbox->y2)
++            y2 = pbox->y2;
++        if (x1 >= x2 || y1 >= y2)
++            continue;
++        Bool done = FALSE;
++        int w = x2 - x1;
++        int h = y2 - y1;
++        /* first try pixman (NEON) */
++        if (!done) {
++            done = pixman_blt((uint32_t *)src, (uint32_t *)dst, srcStride, dstStride,
++                 dstBpp, dstBpp, x1 - x,
++                 y1 - y, x1 + dstXoff,
++                 y1 + dstYoff, w,
++                 h);
++        }
++        // otherwise fall back to fb */
++        if (!done)
++            fbBlt(src + (y1 - y) * srcStride,
++                  srcStride,
++                  (x1 - x) * dstBpp,
++                  dst + (y1 + dstYoff) * dstStride,
++                  dstStride,
++                  (x1 + dstXoff) * dstBpp,
++                  w * dstBpp,
++                  h, GXcopy, FB_ALLONES, dstBpp, FALSE, FALSE);
++    }
++    fbFinishAccess(pDrawable);
++}
++
+ static Bool
+ xCreateGC(GCPtr pGC)
+ {
+@@ -228,6 +317,8 @@ xCreateGC(GCPtr pGC)
+ 
+         /* Add our own hook for CopyArea function */
+         self->pGCOps->CopyArea = xCopyArea;
++        /* Add our own hook for PutImage */
++        self->pGCOps->PutImage = xPutImage;
+     }
+     pGC->ops = self->pGCOps;
+ 
+-- 
+1.7.10.4
+

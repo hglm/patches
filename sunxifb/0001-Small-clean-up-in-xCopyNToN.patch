@@ -1,0 +1,47 @@
+From d809d2893be6c4d552f176b2c620b04a21098af7 Mon Sep 17 00:00:00 2001
+From: Harm Hanemaaijer <fgenfb@yahoo.com>
+Date: Fri, 24 May 2013 18:15:11 +0200
+Subject: [PATCH 1/5] Small clean-up in xCopyNToN
+
+In xCopyNToN, it is guaranteed that alu == GXcopy and planemask
+== FB_ALL_ONES, so no need to check for them.
+
+Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
+---
+ src/sunxi_x_g2d.c |    6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/sunxi_x_g2d.c b/src/sunxi_x_g2d.c
+index de91bbb..a13b0a1 100644
+--- a/src/sunxi_x_g2d.c
++++ b/src/sunxi_x_g2d.c
+@@ -134,8 +134,6 @@ xCopyNtoN(DrawablePtr pSrcDrawable,
+           int dy,
+           Bool reverse, Bool upsidedown, Pixel bitplane, void *closure)
+ {
+-    CARD8 alu = pGC ? pGC->alu : GXcopy;
+-    FbBits pm = pGC ? fbGetGCPrivate(pGC)->pm : FB_ALLONES;
+     FbBits *src;
+     FbStride srcStride;
+     int srcBpp;
+@@ -173,6 +171,8 @@ xCopyNtoN(DrawablePtr pSrcDrawable,
+ 
+         /* fallback to fbBlt if other methods did not work */
+         if (!done) {
++            // Due to the check in xCopyArea, it is guaranteed that pGC->alu == GXcopy
++            // and the planemask is FB_ALLONES.
+             fbBlt(src + (pbox->y1 + dy + srcYoff) * srcStride,
+                   srcStride,
+                   (pbox->x1 + dx + srcXoff) * srcBpp,
+@@ -180,7 +180,7 @@ xCopyNtoN(DrawablePtr pSrcDrawable,
+                   dstStride,
+                   (pbox->x1 + dstXoff) * dstBpp,
+                   (pbox->x2 - pbox->x1) * dstBpp,
+-                  (pbox->y2 - pbox->y1), alu, pm, dstBpp, reverse, upsidedown);
++                  (pbox->y2 - pbox->y1), GXcopy, FB_ALLONES, dstBpp, reverse, upsidedown);
+         }
+         pbox++;
+     }
+-- 
+1.7.10.4
+

@@ -1,6 +1,9 @@
 Miscellaneous patches and files
 
-sunxifb-performance-tests gives some detail on performance improvements implemented
+sunxifb/ holds patches for the xf86-video-sunxifb driver corresponding to the
+various-optimizations branch.
+
+sunxifb/sunxifb-performance-tests gives some detail on performance improvements implemented
 by the various-optimizations branch of the forked xf86-video-sunxi repository using
 benchmarks such as x11perf.
 

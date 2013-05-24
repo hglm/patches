@@ -1,0 +1,91 @@
+From 828e3b7accebd4c749f3707ebcc4dd34dd960ecc Mon Sep 17 00:00:00 2001
+From: Harm Hanemaaijer <fgenfb@yahoo.com>
+Date: Fri, 24 May 2013 18:38:04 +0200
+Subject: [PATCH 2/5] Implement an area threshold for using G2D blits.
+
+Due to the overhead of G2D for small screen-to-screen blits, CPU blits
+are faster for small areas.
+
+The area threshold below which CPU blits are triggered is currently
+conservatively set to 200 for 32bpp and 1000 for 16bpp. While these
+thresholds will will not slow down anything, they could be fine-tuned
+to use CPU blit for greater area sizes.
+
+Some benchmarks:
+
+1920x1080x16bppx60Hz, ShadowFB disabled:
+
+x11perf -scroll10
+
+Before:
+1500000 trep @   0.0239 msec ( 41800.0/sec): Scroll 10x10 pixels
+After:
+2500000 trep @   0.0110 msec ( 90900.0/sec): Scroll 10x10 pixels
+
+x11perf -copywinwin10
+
+Before:
+1200000 trep @   0.0247 msec ( 40500.0/sec): Copy 10x10 from window to window
+After:
+1800000 trep @   0.0146 msec ( 68600.0/sec): Copy 10x10 from window to window
+
+Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
+---
+ src/sunxi_disp.c |   13 +++++++++++++
+ src/sunxi_disp.h |    9 +++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/src/sunxi_disp.c b/src/sunxi_disp.c
+index 559598a..a5c731b 100644
+--- a/src/sunxi_disp.c
++++ b/src/sunxi_disp.c
+@@ -489,6 +489,7 @@ int sunxi_g2d_blt(void               *self,
+                   int                 h)
+ {
+     sunxi_disp_t *disp = (sunxi_disp_t *)self;
++    int blt_size_threshold;
+     g2d_blt tmp;
+     /*
+      * Very minimal validation here. We just assume that if the begginging
+@@ -508,6 +509,18 @@ int sunxi_g2d_blt(void               *self,
+     if (w <= 0 || h <= 0)
+         return 1;
+ 
++    /*
++     * If the area is smaller than G2D_BLT_SIZE_THRESHOLD, prefer to avoid the
++     * overhead of G2D and do a CPU blit instead. There is a special threshold
++     * for 16bpp to 16bpp copy.
++     */
++    if (src_bpp == 16 && dst_bpp == 16)
++        blt_size_threshold = G2D_BLT_SIZE_THRESHOLD_16BPP;
++    else
++        blt_size_threshold = G2D_BLT_SIZE_THRESHOLD;
++    if (w * h < blt_size_threshold)
++        return 0;
++
+     /* Unsupported overlapping type */
+     if (src_bits == dst_bits && src_y == dst_y && src_x + 1 < dst_x)
+         return 0;
+diff --git a/src/sunxi_disp.h b/src/sunxi_disp.h
+index dc3f304..11a74fb 100644
+--- a/src/sunxi_disp.h
++++ b/src/sunxi_disp.h
+@@ -118,6 +118,15 @@ int sunxi_g2d_blit_a8r8g8b8(sunxi_disp_t *disp,
+                             int           w,
+                             int           h);
+ 
++/*
++ * The following constants are used sunxi_disp.c and represent
++ * the area threshold below which the sunxi_g2d_blit function will
++ * return 0, indicating that a software blit is preferred. The
++ * 16BPP constant applies to 16bpp to 16bpp blit.
++ */
++#define G2D_BLT_SIZE_THRESHOLD 200
++#define G2D_BLT_SIZE_THRESHOLD_16BPP 1000
++
+ /* G2D counterpart for pixman_blt with the support for 16bpp and 32bpp */
+ int sunxi_g2d_blt(void               *disp,
+                   uint32_t           *src_bits,
+-- 
+1.7.10.4
+
