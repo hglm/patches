@@ -1,0 +1,186 @@
+When using G2D screen to screen blits or fills, there exists
+an area size threshold below which it is beneficial to perform
+the operation with the CPU because of the overhead of G2D.
+
+These low-level test results give an indication of what the
+optimal size threshold is for different color depths for
+falling back to the CPU.
+
+1. Screen to screen blits:
+
+1920x1080x32bpp
+
+Threshold = 1 (always use G2D blit)
+
+CopyArea (5 x 5): operations per second: 30070.15
+CopyArea (7 x 7): operations per second: 36777.37
+CopyArea (10 x 10): operations per second: 36238.57
+CopyArea (15 x 15): operations per second: 27768.73
+CopyArea (22 x 22): operations per second: 26467.49
+CopyArea (33 x 33): operations per second: 24629.16
+CopyArea (49 x 49): operations per second: 19850.46
+CopyArea (73 x 73): operations per second: 14245.99
+CopyArea (109 x 109): operations per second: 8722.52
+CopyArea (163 x 163): operations per second: 4546.63
+CopyArea (244 x 244): operations per second: 2298.29
+CopyArea (366 x 366): operations per second: 1121.60
+
+Threshold = 10000000 (always use CPU blit)
+
+CopyArea (5 x 5): operations per second: 81446.58
+CopyArea (7 x 7): operations per second: 76568.28
+CopyArea (10 x 10): operations per second: 72571.23
+CopyArea (15 x 15): operations per second: 61297.60
+CopyArea (22 x 22): operations per second: 43819.60
+CopyArea (33 x 33): operations per second: 29805.25
+CopyArea (49 x 49): operations per second: 16443.82
+CopyArea (73 x 73): operations per second: 9824.15
+CopyArea (109 x 109): operations per second: 5127.36
+CopyArea (163 x 163): operations per second: 2415.44
+CopyArea (244 x 244): operations per second: 1132.63
+CopyArea (366 x 366): operations per second: 501.53
+
+Threshold = 1000 (compromise)
+
+CopyArea (5 x 5): operations per second: 79993.60
+CopyArea (7 x 7): operations per second: 76848.60
+CopyArea (10 x 10): operations per second: 72788.44
+CopyArea (15 x 15): operations per second: 61488.48
+CopyArea (22 x 22): operations per second: 43907.71 (CPU blit)
+CopyArea (33 x 33): operations per second: 24669.56 (G2D blit)
+CopyArea (49 x 49): operations per second: 20077.45
+CopyArea (73 x 73): operations per second: 14407.59
+CopyArea (109 x 109): operations per second: 8521.12
+CopyArea (163 x 163): operations per second: 4455.96
+CopyArea (244 x 244): operations per second: 2302.10
+CopyArea (366 x 366): operations per second: 1122.97
+
+1920x1080x16bpp
+
+Threshold = 1 (always use G2D blit)
+
+CopyArea (5 x 5): operations per second: 28642.54
+CopyArea (7 x 7): operations per second: 28561.19
+CopyArea (10 x 10): operations per second: 29387.85
+CopyArea (15 x 15): operations per second: 27485.66
+CopyArea (22 x 22): operations per second: 21807.06
+CopyArea (33 x 33): operations per second: 20346.74
+CopyArea (49 x 49): operations per second: 17682.07
+CopyArea (73 x 73): operations per second: 15357.43
+CopyArea (109 x 109): operations per second: 10602.25
+CopyArea (163 x 163): operations per second: 6296.02
+CopyArea (244 x 244): operations per second: 3367.23
+CopyArea (366 x 366): operations per second: 1724.69
+
+Threshold = 10000000 (always use CPU blit)
+
+CopyArea (5 x 5): operations per second: 72304.77
+CopyArea (7 x 7): operations per second: 77674.63
+CopyArea (10 x 10): operations per second: 75610.15
+CopyArea (15 x 15): operations per second: 65465.58
+CopyArea (22 x 22): operations per second: 56489.90
+CopyArea (33 x 33): operations per second: 37458.18
+CopyArea (49 x 49): operations per second: 24555.83
+CopyArea (73 x 73): operations per second: 16131.48
+CopyArea (109 x 109): operations per second: 9619.92
+CopyArea (163 x 163): operations per second: 4921.66
+CopyArea (244 x 244): operations per second: 2445.67
+CopyArea (366 x 366): operations per second: 1105.44
+
+Threshold = 2500 (compromise)
+
+CopyArea (5 x 5): operations per second: 67332.45
+CopyArea (7 x 7): operations per second: 76978.33
+CopyArea (10 x 10): operations per second: 75119.48
+CopyArea (15 x 15): operations per second: 65251.25
+CopyArea (22 x 22): operations per second: 56362.13
+CopyArea (33 x 33): operations per second: 37544.72
+CopyArea (49 x 49): operations per second: 24250.23 (CPU blit)
+CopyArea (73 x 73): operations per second: 15099.53 (G2D blit)
+CopyArea (109 x 109): operations per second: 10664.39
+CopyArea (163 x 163): operations per second: 6297.41
+CopyArea (244 x 244): operations per second: 3389.50
+CopyArea (366 x 366): operations per second: 1704.30
+
+2. Fills
+
+1920x1080x32bpp
+
+Threshold = 1 (always use G2D)
+
+FillRect (5 x 5): operations per second: 83261.05
+FillRect (7 x 7): operations per second: 83688.16
+FillRect (10 x 10): operations per second: 83429.04
+FillRect (15 x 15): operations per second: 49928.20
+FillRect (22 x 22): operations per second: 47716.15
+FillRect (33 x 33): operations per second: 44150.01
+FillRect (49 x 49): operations per second: 33549.29
+FillRect (73 x 73): operations per second: 21799.75
+FillRect (109 x 109): operations per second: 11258.36
+FillRect (163 x 163): operations per second: 5681.95
+FillRect (244 x 244): operations per second: 2845.38
+FillRect (366 x 366): operations per second: 1300.61
+
+Threshold = 10000000 (always use CPU)
+
+FillRect (5 x 5): operations per second: 1675964.22
+FillRect (7 x 7): operations per second: 1513852.63
+FillRect (10 x 10): operations per second: 1046900.64
+FillRect (15 x 15): operations per second: 540951.83
+FillRect (22 x 22): operations per second: 267169.38
+FillRect (33 x 33): operations per second: 126257.18
+FillRect (49 x 49): operations per second: 63644.89
+FillRect (73 x 73): operations per second: 31290.86
+FillRect (109 x 109): operations per second: 15325.15
+FillRect (163 x 163): operations per second: 6521.32
+FillRect (244 x 244): operations per second: 3274.46
+FillRect (366 x 366): operations per second: 1439.97
+
+Threshold = 5000 (compromise)
+
+FillRect (5 x 5): operations per second: 1791030.30
+FillRect (7 x 7): operations per second: 1514415.22
+FillRect (10 x 10): operations per second: 1046160.13
+FillRect (15 x 15): operations per second: 521224.66
+FillRect (22 x 22): operations per second: 245935.85
+FillRect (33 x 33): operations per second: 134035.44
+FillRect (49 x 49): operations per second: 67119.89 (CPU fill)
+FillRect (73 x 73): operations per second: 21839.85 (G2D fill)
+FillRect (109 x 109): operations per second: 11121.42
+FillRect (163 x 163): operations per second: 5666.97
+FillRect (244 x 244): operations per second: 2846.27
+FillRect (366 x 366): operations per second: 1300.83
+
+1920x1080x16bpp
+
+Threshold = 1 (always use G2D)
+
+FillRect (5 x 5): operations per second: 41213.47
+FillRect (7 x 7): operations per second: 42156.73
+FillRect (10 x 10): operations per second: 41962.35
+FillRect (15 x 15): operations per second: 42085.07
+FillRect (22 x 22): operations per second: 29933.98
+FillRect (33 x 33): operations per second: 29074.77
+FillRect (49 x 49): operations per second: 27638.06
+FillRect (73 x 73): operations per second: 20291.08
+FillRect (109 x 109): operations per second: 14864.14
+FillRect (163 x 163): operations per second: 9257.28
+FillRect (244 x 244): operations per second: 4931.01
+FillRect (366 x 366): operations per second: 2530.25
+
+Threshold = 10000000 (always use CPU)
+
+FillRect (5 x 5): operations per second: 1271927.91
+FillRect (7 x 7): operations per second: 1460551.84
+FillRect (10 x 10): operations per second: 1255526.02
+FillRect (15 x 15): operations per second: 879481.69
+FillRect (22 x 22): operations per second: 487909.59
+FillRect (33 x 33): operations per second: 241473.20
+FillRect (49 x 49): operations per second: 120740.35
+FillRect (73 x 73): operations per second: 75198.10
+FillRect (109 x 109): operations per second: 39275.00
+FillRect (163 x 163): operations per second: 18862.95
+FillRect (244 x 244): operations per second: 8741.81
+FillRect (366 x 366): operations per second: 3956.53
+
+
