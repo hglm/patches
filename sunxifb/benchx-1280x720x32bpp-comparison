@@ -1,0 +1,36 @@
+Processed 131 results in benchx-1280x720x32bpp-sunxifb-master.
+Processed 131 results in benchx-1280x720x32bpp-sunxifb-various-optimizations.
+ScreenCopy (5 x 5): Speed up 126%
+ScreenCopy (7 x 7): Speed up 123%
+ScreenCopy (10 x 10): Speed up 119%
+ScreenCopy (15 x 15): Speed up 146%
+ScreenCopy (22 x 22): Speed up 89%
+AlignedScreenCopy (5 x 5): Speed up 119%
+AlignedScreenCopy (7 x 7): Speed up 130%
+AlignedScreenCopy (10 x 10): Speed up 119%
+AlignedScreenCopy (15 x 15): Speed up 146%, CPU usage increase from 81% to 98%
+AlignedScreenCopy (22 x 22): Speed up 92%
+FillRect (10 x 10): CPU usage decrease from 90% to 79%
+FillRect (22 x 22): Slow down 7%
+FillRect (73 x 73): Slow down 49%, CPU usage decrease from 101% to 15%
+FillRect (109 x 109): Slow down 41%, CPU usage decrease from 102% to 17%
+FillRect (163 x 163): Slow down 32%, CPU usage decrease from 101% to 5%
+FillRect (244 x 244): Slow down 27%, CPU usage decrease from 101% to 3%
+FillRect (366 x 366): Slow down 23%, CPU usage decrease from 101% to 1%
+FillRect (549 x 549): Slow down 20%, CPU usage decrease from 101% to 0%
+PutImage (5 x 5): Slow down 27%, CPU usage increase from 66% to 89%
+PutImage (7 x 7): CPU usage increase from 69% to 83%
+PutImage (10 x 10): Speed up 6%
+PutImage (15 x 15): Speed up 8%
+PutImage (22 x 22): Speed up 8%
+PutImage (33 x 33): Speed up 14%
+PutImage (49 x 49): Speed up 17%
+PutImage (73 x 73): Speed up 15%
+PutImage (109 x 109): Speed up 10%
+PutImage (163 x 163): Speed up 13%, CPU usage decrease from 54% to 28%
+PutImage (244 x 244): Speed up 18%, CPU usage decrease from 63% to 46%
+PutImage (366 x 366): Speed up 18%, CPU usage decrease from 54% to 29%
+PutImage (549 x 549): Speed up 19%
+PixmapCopy (244 x 244): Speed up 10%
+PixmapCopy (366 x 366): Slow down 6%
+PixmapFillRect (5 x 5): CPU usage increase from 68% to 84%
