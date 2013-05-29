@@ -1,0 +1,28 @@
+From ea3e839b68ade839cdf6a4e3d1746d45311f6247 Mon Sep 17 00:00:00 2001
+From: Harm Hanemaaijer <fgenfb@yahoo.com>
+Date: Wed, 29 May 2013 21:15:58 +0200
+Subject: [PATCH] Fix missing argument in fill_noop in CPU backend
+
+
+Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
+---
+ src/cpu_backend.c |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/cpu_backend.c b/src/cpu_backend.c
+index f3191f6..7957df6 100644
+--- a/src/cpu_backend.c
++++ b/src/cpu_backend.c
+@@ -183,7 +183,8 @@ overlapped_blt_noop(void     *self,
+ }
+ 
+ static int
+-fill_noop(uint32_t       *bits,
++fill_noop(void                *self,
++          uint32_t            *bits,
+           int                 stride,
+           int                 bpp,
+           int                 x,
+-- 
+1.7.10.4
+
