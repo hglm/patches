@@ -10,3 +10,7 @@ benchmarks such as x11perf.
 benchimagemark.tar.gz is a slightly modified version of a program I found
 on the web to measure off-screen to screen copy throughput using various methods
 (xPutImage, xShmPutImage, shared memory pixmaps).
+
+kernel-cfbimageblt.patch is a patch for the 3.4.x kernel used on the Allwinner platform
+to speed up framebuffer console text drawing.
+
