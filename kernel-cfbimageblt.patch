@@ -1,4 +1,4 @@
-From 307c0892f4d90f2ca73ce23a42d4035dc213a075 Mon Sep 17 00:00:00 2001
+From 9d46303cecfa0787bb697f30514190c96806e424 Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Tue, 18 Jun 2013 08:17:02 +0200
 Subject: [PATCH] Improve performance of console framebuffer imageblit
@@ -21,13 +21,41 @@ reducing source memory access instructions, and eliminating excessive
 branching. These unrolled loops also allow much better code optimization
 by the C compiler.
 
+time cat bigfile.txt
+
+Console framebuffer resolution 1920x1080, 12x24 font.
+
+Without patch, 16bpp:
+
+real    1m32.732s
+user    0m0.000s
+sys     1m32.730s
+
+With patch, 16bpp:
+
+real    1m1.912s
+user    0m0.000s
+sys     1m1.910s
+
+Without patch, 32bpp:
+
+real    2m42.223s
+user    0m0.000s
+sys     2m42.220s
+
+With patch, 32bpp:
+
+real    1m38.179s
+user    0m0.000s
+sys     1m38.180s
+
 Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
 ---
  drivers/video/cfbimgblt.c |  136 +++++++++++++++++++++++++++++++++++++++++++--
  1 file changed, 130 insertions(+), 6 deletions(-)
 
 diff --git a/drivers/video/cfbimgblt.c b/drivers/video/cfbimgblt.c
-index baed57d..1c5f54b 100644
+index baed57d..9a78203 100644
 --- a/drivers/video/cfbimgblt.c
 +++ b/drivers/video/cfbimgblt.c
 @@ -261,7 +261,124 @@ static inline void fast_imageblit(const struct fb_image *image, struct fb_info *
@@ -67,7 +95,7 @@ index baed57d..1c5f54b 100644
 +                dst = (u32 __iomem *) dst1; src = s;
 +
 +		j = k;
-+		while (j >= 8) {
++		while (j >= 4) {
 +			u8 bits = *src;
 +                        end_mask = tab[(bits >> 6) & 3];
 +                        FB_WRITEL((end_mask & eorx) ^ bgx, dst++);
@@ -78,7 +106,7 @@ index baed57d..1c5f54b 100644
 +                        end_mask = tab[bits & 3];
 +                        FB_WRITEL((end_mask & eorx) ^ bgx, dst++);
 +			src++;
-+			j -= 8;
++			j -= 4;
 +                }
 +
 +		shift = 8;
