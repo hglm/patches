@@ -1,4 +1,4 @@
-From 60030ed05274149306e100aad62deb255cb74f50 Mon Sep 17 00:00:00 2001
+From a283c398cda4add9cebb6f93cdd252756b98ecb9 Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Tue, 18 Jun 2013 08:17:02 +0200
 Subject: [PATCH] Improve performance of console framebuffer imageblit
@@ -41,7 +41,7 @@ real    1m32.732s
 user    0m0.000s
 sys     1m32.730s
 
-With patch, 16bpp:
+With patch, 16bpp (speed up 56%):
 
 real    0m59.408s
 user    0m0.000s
@@ -53,11 +53,39 @@ real    2m42.223s
 user    0m0.000s
 sys     2m42.220s
 
-With patch, 32bpp:
+With patch, 32bpp (speed up 68%):
 
 real    1m36.546s
 user    0m0.000s
 sys     1m36.540s
+
+On the Raspberry Pi:
+
+Console framebuffer resolution 1280x1024, 8x16 font.
+
+Without patch, 16bpp:
+
+real    1m41.713s
+user    0m0.000s
+sys     1m41.050s
+
+With patch, 16bpp (speed up 39%):
+
+real    1m12.982s
+user    0m0.000s
+sys     1m12.840s
+
+Without patch, 32bpp:
+
+real    2m51.666s
+user    0m0.000s
+sys     2m51.350s
+
+With patch, 32bpp (speed up 52%):
+
+real    1m52.593s
+user    0m0.000s
+sys     1m52.400s
 
 Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
 ---
