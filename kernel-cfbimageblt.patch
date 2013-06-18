@@ -1,4 +1,4 @@
-From 9d46303cecfa0787bb697f30514190c96806e424 Mon Sep 17 00:00:00 2001
+From 9766735d51deb57a8cccf79becfe22bdfec603eb Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Tue, 18 Jun 2013 08:17:02 +0200
 Subject: [PATCH] Improve performance of console framebuffer imageblit
@@ -22,6 +22,8 @@ branching. These unrolled loops also allow much better code optimization
 by the C compiler.
 
 time cat bigfile.txt
+
+On the Allwinner platform:
 
 Console framebuffer resolution 1920x1080, 12x24 font.
 
@@ -55,7 +57,7 @@ Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
  1 file changed, 130 insertions(+), 6 deletions(-)
 
 diff --git a/drivers/video/cfbimgblt.c b/drivers/video/cfbimgblt.c
-index baed57d..9a78203 100644
+index baed57d..e413acc 100644
 --- a/drivers/video/cfbimgblt.c
 +++ b/drivers/video/cfbimgblt.c
 @@ -261,7 +261,124 @@ static inline void fast_imageblit(const struct fb_image *image, struct fb_info *
@@ -69,9 +71,9 @@ index baed57d..9a78203 100644
 + * main loop unrolled.
 + */
 +
-+static inline void fast_imageblit16(const struct fb_image *image, struct fb_info *p, 
-+                                  u8 __iomem *dst1, u32 fgcolor, 
-+                                  u32 bgcolor) 
++static inline void fast_imageblit16(const struct fb_image *image, struct fb_info *p,
++                                  u8 __iomem *dst1, u32 fgcolor,
++                                  u32 bgcolor)
 +{
 +        u32 fgx = fgcolor, bgx = bgcolor;
 +        u32 spitch = (image->width + 7)/8;
@@ -126,9 +128,9 @@ index baed57d..9a78203 100644
 + * main loop unrolled.
 + */
 +
-+static inline void fast_imageblit32(const struct fb_image *image, struct fb_info *p, 
-+                                  u8 __iomem *dst1, u32 fgcolor, 
-+                                  u32 bgcolor) 
++static inline void fast_imageblit32(const struct fb_image *image, struct fb_info *p,
++                                  u8 __iomem *dst1, u32 fgcolor,
++                                  u32 bgcolor)
 +{
 +        u32 fgx = fgcolor, bgx = bgcolor;
 +        u32 spitch = (image->width + 7)/8;
