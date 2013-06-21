@@ -1,6 +1,6 @@
-From 0647b9b42d3eb69b600fa1b085840b560b1858b8 Mon Sep 17 00:00:00 2001
+From 7b297aee6373b7335e430bf5a7b6d013ae4bf4dd Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
-Date: Thu, 20 Jun 2013 19:19:58 +0200
+Date: Thu, 20 Jun 2013 20:21:39 +0200
 Subject: [PATCH] Speed up console framebuffer imageblit function
 
 Especially on platforms with a slower CPU but a relatively high
@@ -29,11 +29,11 @@ the greater benefit for 32bpp.
 
 Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
 ---
- drivers/video/cfbimgblt.c |  154 +++++++++++++++++++++++++++++++++++++++++++--
- 1 file changed, 148 insertions(+), 6 deletions(-)
+ drivers/video/cfbimgblt.c |  152 +++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 147 insertions(+), 5 deletions(-)
 
 diff --git a/drivers/video/cfbimgblt.c b/drivers/video/cfbimgblt.c
-index baed57d..c4b7a32 100644
+index baed57d..ce91bf2 100644
 --- a/drivers/video/cfbimgblt.c
 +++ b/drivers/video/cfbimgblt.c
 @@ -28,6 +28,11 @@
@@ -182,7 +182,7 @@ index baed57d..c4b7a32 100644
  void cfb_imageblit(struct fb_info *p, const struct fb_image *image)
  {
  	u32 fgcolor, bgcolor, start_index, bitstart, pitch_index = 0;
-@@ -294,13 +426,23 @@ void cfb_imageblit(struct fb_info *p, const struct fb_image *image)
+@@ -294,11 +426,21 @@ void cfb_imageblit(struct fb_info *p, const struct fb_image *image)
  			bgcolor = image->bg_color;
  		}	
  		
@@ -207,11 +207,8 @@ index baed57d..c4b7a32 100644
 +					       start_index, pitch_index);
 +		} else
  			slow_imageblit(image, p, dst1, fgcolor, bgcolor,
--					start_index, pitch_index);
-+				       start_index, pitch_index);
+ 					start_index, pitch_index);
  	} else
- 		color_imageblit(image, p, dst1, start_index, pitch_index);
- }
 -- 
-1.7.10.4
+1.7.9.5
 
