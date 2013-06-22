@@ -1,23 +1,35 @@
-From f0da799fd28f5e2acb43a9a9d707874efea78e8a Mon Sep 17 00:00:00 2001
+From 5a8ff991e744be1e3b670e5fba6f2c472cfb6bf5 Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Fri, 21 Jun 2013 00:26:17 +0200
 Subject: [PATCH 2/2] Optimize kernel memcpy function
 
+Optimize prefetch for Raspberry Pi in memcpy variants by
+prefetching at 32-byte aligned addresses. Additionally, the CALGN
+optional code macro is enabled for write alignment to 32 bytes in
+the memcpy variants.
+
+For memzero and memset, we do not enable the CALGN code because
+it is slower on the Raspberry Pi. For this purpose, a seperate
+macro CALGN_MEMSET is defined in arch/arm/include/asm/assembler.h
+that defines whether alignment code is emitted in the memset and
+memzero assembler functions.
 
 Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
 ---
- arch/arm/include/asm/assembler.h |    2 +-
+ arch/arm/include/asm/assembler.h |   15 ++++++++-
  arch/arm/lib/copy_from_user.S    |    4 +++
  arch/arm/lib/copy_template.S     |   67 ++++++++++++++++++++++++--------------
  arch/arm/lib/copy_to_user.S      |    7 ++++
  arch/arm/lib/memcpy.S            |    4 +++
- 5 files changed, 58 insertions(+), 26 deletions(-)
+ arch/arm/lib/memset.S            |    2 +-
+ arch/arm/lib/memzero.S           |    2 +-
+ 7 files changed, 73 insertions(+), 28 deletions(-)
 
 diff --git a/arch/arm/include/asm/assembler.h b/arch/arm/include/asm/assembler.h
-index 5c8b3bf4..f200900 100644
+index 5c8b3bf4..70820b1 100644
 --- a/arch/arm/include/asm/assembler.h
 +++ b/arch/arm/include/asm/assembler.h
-@@ -70,7 +70,7 @@
+@@ -70,13 +70,26 @@
   *
   * On Feroceon there is much to gain however, regardless of cache mode.
   */
@@ -26,6 +38,25 @@ index 5c8b3bf4..f200900 100644
  #define CALGN(code...) code
  #else
  #define CALGN(code...)
+ #endif
+ 
+ /*
++ * While the Raspberry Pi benefits from write alignment for
++ * memcpy variants (CALGN macro), this is not the case for memzero/memset.
++ * So when CONFIG_CPU_V6 is defined, don't enable write alignment
++ * for these functions.
++ */
++
++#ifdef CONFIG_CPU_FEROCEON
++#define CALGN_MEMSET(code...) code
++#else
++#define CALGN_MEMSET(code...)
++#endif
++
++/*
+  * Enable and disable interrupts
+  */
+ #if __LINUX_ARM_ARCH__ >= 6
 diff --git a/arch/arm/lib/copy_from_user.S b/arch/arm/lib/copy_from_user.S
 index 66a477a..54f1151 100644
 --- a/arch/arm/lib/copy_from_user.S
@@ -203,6 +234,32 @@ index a9b9e22..b939948 100644
  	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
  	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4, \reg5, \reg6, \reg7, \reg8}
  	.endm
+diff --git a/arch/arm/lib/memset.S b/arch/arm/lib/memset.S
+index 650d592..c58da8a 100644
+--- a/arch/arm/lib/memset.S
++++ b/arch/arm/lib/memset.S
+@@ -40,7 +40,7 @@ ENTRY(memset)
+ 	cmp	r2, #16
+ 	blt	4f
+ 
+-#if ! CALGN(1)+0
++#if ! CALGN_MEMSET(1)+0
+ 
+ /*
+  * We need an extra register for this loop - save the return address and
+diff --git a/arch/arm/lib/memzero.S b/arch/arm/lib/memzero.S
+index 3fbdef5..0fb857f 100644
+--- a/arch/arm/lib/memzero.S
++++ b/arch/arm/lib/memzero.S
+@@ -40,7 +40,7 @@ ENTRY(__memzero)
+ 	cmp	r1, #16			@ 1 we can skip this chunk if we
+ 	blt	4f			@ 1 have < 16 bytes
+ 
+-#if ! CALGN(1)+0
++#if ! CALGN_MEMSET(1)+0
+ 
+ /*
+  * We need an extra register for this loop - save the return address and
 -- 
 1.7.9.5
 
