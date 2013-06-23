@@ -1,16 +1,44 @@
 Miscellaneous patches and files
 
-sunxifb/ holds patches for the xf86-video-sunxifb driver corresponding to the
-various-optimizations branch.
+kernel-cfbimageblt.patch is a patch for the Linux kernel to significantly
+speed up framebuffer console text drawing. It has been tested on a 3.4.x
+kernel used on the ARM-based Allwinner platform and on a 3.6.x kernel on
+the ARM-based Raspberry Pi platform. It should be platform independent
+although it has only been tested on ARM platforms. The biggest benefit of
+using this patch will be gained on systems with a relatively slower CPU but
+with a decent amount of framebuffer bandwidth, such as ARM-based devices.
 
-sunxifb/sunxifb-performance-tests gives some detail on performance improvements implemented
-by the various-optimizations branch of the forked xf86-video-sunxi repository using
-benchmarks such as x11perf.
+Tested platforms:
+
+- Raspberry Pi with 3.6.y kernel.
+- Allwinner A10 linux-sunxi platform with 3.4.x kernel.
+
+kernel-armv6v7-mem-funcs.patch is a patch for the Linux kernel to bring up
+to date the ARM-optimized memory copy and fill functions, which are for a
+large part still optimized for older ARM platforms and do not perform
+optimally on more recent platforms. The patch supports both armv6 (line
+size 32 bytes) and armv7 (line size 64 bytes) platforms. The patch
+implements changes to the prefetch strategy and other optimizations. On
+certain platforms, such as the armv6-based Raspberry Pi, a significant speed
+improvement (on the order of 70%) is seen for important functions like
+copy_page and larger size memcpy. On armv7-based platforms a smaller, but
+nonetheless not insignificant benefit is seen. The changes keep using the
+regular register file, without using vfp or NEON, minimizing overhead. In
+its current form the patch may break older ARM architectures or (more
+likely) cause a performance regression for them.
+
+Tested platforms:
+
+- Raspberry Pi (armv6) with 3.6.y kernel.
+
+sunxifb/ holds mostly obsolete patches for the xf86-video-sunxifb driver
+corresponding to the various-optimizations branch.
+
+sunxifb/sunxifb-performance-tests gives some detail on performance
+improvements implemented by the various-optimizations branch of the forked
+xf86-video-sunxi repository using benchmarks such as x11perf.
 
 benchimagemark.tar.gz is a slightly modified version of a program I found
-on the web to measure off-screen to screen copy throughput using various methods
-(xPutImage, xShmPutImage, shared memory pixmaps).
-
-kernel-cfbimageblt.patch is a patch for the 3.4.x kernel used on the Allwinner platform
-to speed up framebuffer console text drawing.
+on the web to measure off-screen to screen copy throughput using various
+methods (xPutImage, xShmPutImage, shared memory pixmaps).
 
