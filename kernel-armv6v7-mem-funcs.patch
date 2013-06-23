@@ -1,0 +1,469 @@
+From 4fc5b8ce91fea9074d86c496b8a679b6f4a286d7 Mon Sep 17 00:00:00 2001
+From: Harm Hanemaaijer <fgenfb@yahoo.com>
+Date: Sun, 23 Jun 2013 00:50:17 +0200
+Subject: [PATCH] Optimize kernel memcpy/memset functions for ARM v6/v7
+
+Optimize prefetch for modern ARM platforms in memcpy variants by
+prefetching at 32-byte or 64-byte aligned addresses, depending on
+L1_CACHE_BYTES. Additionally, the CALGN macro optional code is
+enabled for ARM architectures >= v6 to force write alignment to
+32 bytes in the memcpy variants.
+
+For memzero and memset, we do not enable write alignment via the
+CALGN code for armv6 because it is slower on the Raspberry Pi.
+For this purpose, a seperate macro CALGN_MEMSET is defined in
+arch/arm/include/asm/assembler.h that defines whether alignment
+code is emitted in the memset and memzero assembler functions.
+
+Also optimize copy_page with L1_CACHE_BYTES aligned prefetches.
+
+A new constant, PREFETCH_DISTANCE, is defined in
+arch/arm/include/asm/cache.h which when multiplied with
+L1_CACHE_BYTES is equal to the preload offset used for
+prefetching. It defaults to 3 (96) for armv6 (L1_CACHE_BYTES ==
+32), and 3 (192) for armv7 (L1_CACHE_BYTES == 64).
+
+Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
+---
+ arch/arm/include/asm/assembler.h |   22 +++++++-
+ arch/arm/include/asm/cache.h     |   12 +++++
+ arch/arm/lib/copy_from_user.S    |    5 ++
+ arch/arm/lib/copy_page.S         |   64 +++++++++++++++++------
+ arch/arm/lib/copy_template.S     |  106 ++++++++++++++++++++++++++++----------
+ arch/arm/lib/copy_to_user.S      |    8 +++
+ arch/arm/lib/memcpy.S            |    5 ++
+ arch/arm/lib/memset.S            |    2 +-
+ arch/arm/lib/memzero.S           |    2 +-
+ 9 files changed, 180 insertions(+), 46 deletions(-)
+
+diff --git a/arch/arm/include/asm/assembler.h b/arch/arm/include/asm/assembler.h
+index 5c8b3bf4..d417bab 100644
+--- a/arch/arm/include/asm/assembler.h
++++ b/arch/arm/include/asm/assembler.h
+@@ -57,10 +57,13 @@
+  */
+ #if __LINUX_ARM_ARCH__ >= 5
+ #define PLD(code...)	code
++#define NO_PLD(code...)
+ #else
+ #define PLD(code...)
++#define NO_PLD(code...) code
+ #endif
+ 
++
+ /*
+  * This can be used to enable code to cacheline align the destination
+  * pointer when bulk writing to memory.  Experiments on StrongARM and
+@@ -69,14 +72,31 @@
+  * is used).
+  *
+  * On Feroceon there is much to gain however, regardless of cache mode.
++ * More modern ARM architecutures like armv6 and armv7 also benefit from
++ * write alignment to a 32-bytes bounday.
+  */
+-#ifdef CONFIG_CPU_FEROCEON
++#if defined(CONFIG_CPU_FEROCEON) || __LINUX_ARM_ARCH__ >= 6
+ #define CALGN(code...) code
+ #else
+ #define CALGN(code...)
+ #endif
+ 
+ /*
++ * While the Raspberry Pi (armv6) benefits from write alignment for
++ * memcpy variants (CALGN macro), this is not the case for memzero/memset.
++ * So when CONFIG_CPU_V6 is defined, don't enable write alignment
++ * for these functions.
++ *
++ * For armv7, write alignment for memset/memzero is a win.
++ */
++
++#if defined(CONFIG_CPU_FEROCEON) || __LINUX_ARM_ARCH__ >= 7
++#define CALGN_MEMSET(code...) code
++#else
++#define CALGN_MEMSET(code...)
++#endif
++
++/*
+  * Enable and disable interrupts
+  */
+ #if __LINUX_ARM_ARCH__ >= 6
+diff --git a/arch/arm/include/asm/cache.h b/arch/arm/include/asm/cache.h
+index 75fe66b..ef9db2f 100644
+--- a/arch/arm/include/asm/cache.h
++++ b/arch/arm/include/asm/cache.h
+@@ -8,6 +8,18 @@
+ #define L1_CACHE_BYTES		(1 << L1_CACHE_SHIFT)
+ 
+ /*
++ * Set the prefetch distance in units of L1_CACHE_BYTES based on the
++ * cache line size. The prefetch distance is used by the memcpy
++ * variants and copy_page.
++ */
++
++#if L1_CACHE_BYTES == 64
++#define PREFETCH_DISTANCE 3
++#else
++#define PREFETCH_DISTANCE 3
++#endif 
++
++/*
+  * Memory returned by kmalloc() may be used for DMA, so we must make
+  * sure that all such allocations are cache aligned. Otherwise,
+  * unrelated code may cause parts of the buffer to be read into the
+diff --git a/arch/arm/lib/copy_from_user.S b/arch/arm/lib/copy_from_user.S
+index 66a477a..b27d324 100644
+--- a/arch/arm/lib/copy_from_user.S
++++ b/arch/arm/lib/copy_from_user.S
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/linkage.h>
+ #include <asm/assembler.h>
++#include <asm/cache.h>
+ 
+ /*
+  * Prototype:
+@@ -64,6 +65,10 @@
+ 	W(str) \reg, [\ptr], #4
+ 	.endm
+ 
++	.macro str4w ptr reg1 reg2 reg3 reg4 abort
++	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4}
++	.endm
++
+ 	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
+ 	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4, \reg5, \reg6, \reg7, \reg8}
+ 	.endm
+diff --git a/arch/arm/lib/copy_page.S b/arch/arm/lib/copy_page.S
+index 6ee2f67..74bfac1 100644
+--- a/arch/arm/lib/copy_page.S
++++ b/arch/arm/lib/copy_page.S
+@@ -14,10 +14,22 @@
+ #include <asm/asm-offsets.h>
+ #include <asm/cache.h>
+ 
+-#define COPY_COUNT (PAGE_SZ / (2 * L1_CACHE_BYTES) PLD( -1 ))
++/*
++ * Notes for Raspberry Pi:
++ * RPi does not like paired preloads in a 64-byte loop. Instead,
++ * use a 32-byte loop with one preload per loop. In addition,
++ * make sure no prefetching happens beyond the source region.
++ * The prefetch distance is set to 3 (96 bytes).
++ *
++ * This version should also be usable on architectures other than
++ * armv6 with properly defined L1_CACHE_BYTES and PREFETCH_DISTANCE
++ * (e.g. armv7 with L1_CACHE_BYTES == 64).
++ */
++
++#define COPY_COUNT (PAGE_SZ / (L1_CACHE_BYTES))
+ 
+ 		.text
+-		.align	5
++		.p2align	5
+ /*
+  * StrongARM optimised copy_page routine
+  * now 1.78bytes/cycle, was 1.60 bytes/cycle (50MHz bus -> 89MB/s)
+@@ -25,23 +37,41 @@
+  * the core clock switching.
+  */
+ ENTRY(copy_page)
+-		stmfd	sp!, {r4, lr}			@	2
++		stmfd	sp!, {r4-r8, lr}		@	2
+ 	PLD(	pld	[r1, #0]		)
+ 	PLD(	pld	[r1, #L1_CACHE_BYTES]		)
++.if PREFETCH_DISTANCE > 2
++	PLD(	pld	[r1, #2 * L1_CACHE_BYTES]	)
++.if PREFETCH_DISTANCE > 3
++	PLD(	pld	[r1, #3 * L1_CACHE_BYTES]	)
++.if PREFETCH_DISTANCE > 4
++	PLD(	pld	[r1, #4 * L1_CACHE_BYTES]	)
++.endif
++.endif
++.endif
+ 		mov	r2, #COPY_COUNT			@	1
+-		ldmia	r1!, {r3, r4, ip, lr}		@	4+1
+-1:	PLD(	pld	[r1, #2 * L1_CACHE_BYTES])
+-	PLD(	pld	[r1, #3 * L1_CACHE_BYTES])
++1:	PLD(	pld	[r1, #PREFETCH_DISTANCE * L1_CACHE_BYTES])
+ 2:
+-	.rept	(2 * L1_CACHE_BYTES / 16 - 1)
+-		stmia	r0!, {r3, r4, ip, lr}		@	4
+-		ldmia	r1!, {r3, r4, ip, lr}		@	4
+-	.endr
+-		subs	r2, r2, #1			@	1
+-		stmia	r0!, {r3, r4, ip, lr}		@	4
+-		ldmgtia	r1!, {r3, r4, ip, lr}		@	4
+-		bgt	1b				@	1
+-	PLD(	ldmeqia r1!, {r3, r4, ip, lr}	)
+-	PLD(	beq	2b			)
+-		ldmfd	sp!, {r4, pc}			@	3
++.if L1_CACHE_BYTES == 32
++		ldmia	r1!, {r3-r6}			@	4+1
++	PLD(	sub	r2, r2, #1		)	@	1
++	NO_PLD(	subs	r2, r2, #1		)	@	1
++		ldmia   r1!, {r7, r8, ip, lr}
++		stmia	r0!, {r3-r6}			@	4
++	PLD(	cmp	r2, #PREFETCH_DISTANCE	)
++		stmia   r0!, {r7, r8, ip, lr}
++.else /* L1_CACHE_BYTES == 64 */
++		ldmia   r1!, {r3-r8, ip, lr}
++	PLD(	sub	r2, r2, #1		)	@	1
++	NO_PLD(	subs	r2, r2, #1		)	@	1
++		stmia	r0!, {r3-r8, ip, lr}		@	4
++		ldmia   r1!, {r3-r8, ip, lr}
++	PLD(	cmp	r2, #PREFETCH_DISTANCE	)
++		stmia	r0!, {r3-r8, ip, lr}		@	4
++.endif
++	PLD(	bgt	1b			)	@	1
++	NO_PLD(	bne	1b			)
++	PLD(	teq	r2, #0			)
++	PLD(	bne	2b			)
++		ldmfd	sp!, {r4-r8, pc}		@	3
+ ENDPROC(copy_page)
+diff --git a/arch/arm/lib/copy_template.S b/arch/arm/lib/copy_template.S
+index 805e3f8..3cdb8d3 100644
+--- a/arch/arm/lib/copy_template.S
++++ b/arch/arm/lib/copy_template.S
+@@ -64,21 +64,37 @@
+  *	Correction to be applied to the "ip" register when branching into
+  *	the ldr1w or str1w instructions (some of these macros may expand to
+  *	than one 32bit instruction in Thumb-2)
++ *
++ * L1_CACHE_BYTES
++ *
++ *      The cache line size used for prefetches. Preloads are performed at
++ *      L1_CACHE_BYTES aligned addresses. However, if L1_CACHE_BYTES == 64,
++ *      in the case of unaligned copies preload instructions are performed
++ *      at 32 bytes aligned addresses. The code could be modified to strictly
++ *      preload at 64 bytes aligned addresses, at the cost of increasing code
++ *      size and complexity. However, the armv7 architecture doesn't seem
++ *      to incur a big penalty for the unnecessary preload instructions.
++ *      Additionally unaligned copies are rare.
++ *
++ * PREFETCH_DISTANCE
++ *
++ *      The prefetch distance in units of L1_CACHE_BYTES used for prefetches.
++ *
+  */
+ 
+-
+ 		enter	r4, lr
+ 
+ 		subs	r2, r2, #4
++		bic     r3, r1, #31
+ 		blt	8f
+ 		ands	ip, r0, #3
+-	PLD(	pld	[r1, #0]		)
++	PLD(	pld	[r3]			)
+ 		bne	9f
+ 		ands	ip, r1, #3
+ 		bne	10f
+ 
+ 1:		subs	r2, r2, #(28)
+-		stmfd	sp!, {r5 - r8}
++		stmfd	sp!, {r5 - r9}
+ 		blt	5f
+ 
+ 	CALGN(	ands	ip, r0, #31		)
+@@ -90,19 +106,51 @@
+ 	CALGN(	add	pc, r4, ip		)
+ 
+ 	PLD(	pld	[r1, #0]		)
+-2:	PLD(	subs	r2, r2, #96		)
+-	PLD(	pld	[r1, #28]		)
++2:
++.if L1_CACHE_BYTES == 64
++		cmp     r2, #32
++		sub     r2, r2, #32
++		blt     30f
++.endif
++	PLD(	add     r9, r1, #(PREFETCH_DISTANCE * L1_CACHE_BYTES)	)
++	PLD(	bic     r3, r9, #(L1_CACHE_BYTES - 1)			)
++	PLD(	subs	r2, r2, #(PREFETCH_DISTANCE * L1_CACHE_BYTES)	)
++	PLD(	sub	r9, r3, r1		)
+ 	PLD(	blt	4f			)
+-	PLD(	pld	[r1, #60]		)
+-	PLD(	pld	[r1, #92]		)
+-
+-3:	PLD(	pld	[r1, #124]		)
++.if PREFETCH_DISTANCE >= 4
++	PLD(	pld	[r3, #(- 3 * L1_CACHE_BYTES)]	)
++.if PREFETCH_DISTANCE >= 3
++	PLD(	pld	[r3, #(- 2 * L1_CACHE_BYTES)]	)
++.endif
++.endif
++	PLD(	pld	[r3, #(- L1_CACHE_BYTES)]	)
++
++.if L1_CACHE_BYTES == 32
++3:	PLD(	pld	[r1, r9]		)
+ 4:		ldr8w	r1, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
+ 		subs	r2, r2, #32
+-		str8w	r0, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
++		str4w	r0, r3, r4, r5, r6, abort=20f
++		str4w   r0, r7, r8, ip, lr, abort=20f
+ 		bge	3b
+-	PLD(	cmn	r2, #96			)
++	PLD(	cmn	r2, #PREFETCH_DISTANCE * 32	)
+ 	PLD(	bge	4b			)
++.else /* L1_CACHE_BYTES == 64 */
++3:		pld	[r1, r9]
++4:		ldr8w	r1, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
++		subs	r2, r2, #64
++		str8w	r1, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
++		ldr8w	r1, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
++		str8w	r1, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
++		bge	3b
++		cmn	r2, #PREFETCH_DISTANCE * 64
++		bge	4b
++
++30:		tst     r2, #32
++		beq	31f
++		ldr8w	r1, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
++		str8w	r1, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
++31:
++.endif
+ 
+ 5:		ands	ip, r2, #28
+ 		rsb	ip, ip, #32
+@@ -143,7 +191,7 @@
+ 
+ 	CALGN(	bcs	2b			)
+ 
+-7:		ldmfd	sp!, {r5 - r8}
++7:		ldmfd	sp!, {r5 - r9}
+ 
+ 8:		movs	r2, r2, lsl #31
+ 		ldr1b	r1, r3, ne, abort=21f
+@@ -186,16 +234,22 @@
+ 	CALGN(	subcc	r2, r2, ip		)
+ 	CALGN(	bcc	15f			)
+ 
+-11:		stmfd	sp!, {r5 - r9}
+-
+-	PLD(	pld	[r1, #0]		)
+-	PLD(	subs	r2, r2, #96		)
+-	PLD(	pld	[r1, #28]		)
+-	PLD(	blt	13f			)
+-	PLD(	pld	[r1, #60]		)
+-	PLD(	pld	[r1, #92]		)
+-
+-12:	PLD(	pld	[r1, #124]		)
++11:		stmfd	sp!, {r5 - r10}
++
++        PLD(    add     r10, r1, #(PREFETCH_DISTANCE * L1_CACHE_BYTES)	)
++        PLD(    bic     r3, r10, #(L1_CACHE_BYTES - 1)	)
++        PLD(    subs    r2, r2, #(PREFETCH_DISTANCE * 32)	)
++        PLD(    sub     r10, r3, r1		)
++        PLD(    blt     13f                     )
++.if PREFETCH_DISTANCE >= 4
++	PLD(	pld	[r3, #(- 3 * L1_CACHE_BYTES)]	)
++.if PREFETCH_DISTANCE >= 3
++	PLD(	pld	[r3, #(- 2 * L1_CACHE_BYTES)]	)
++.endif
++.endif
++	PLD(	pld	[r3, #(- L1_CACHE_BYTES)]	)
++
++12:	PLD(	pld	[r1, r10]		)
+ 13:		ldr4w	r1, r4, r5, r6, r7, abort=19f
+ 		mov	r3, lr, pull #\pull
+ 		subs	r2, r2, #32
+@@ -217,10 +271,10 @@
+ 		orr	ip, ip, lr, push #\push
+ 		str8w	r0, r3, r4, r5, r6, r7, r8, r9, ip, , abort=19f
+ 		bge	12b
+-	PLD(	cmn	r2, #96			)
+-	PLD(	bge	13b			)
++	PLD(	cmn	r2, #PREFETCH_DISTANCE * 32	)
++	PLD(	bge	13b				)
+ 
+-		ldmfd	sp!, {r5 - r9}
++		ldmfd	sp!, {r5 - r10}
+ 
+ 14:		ands	ip, r2, #28
+ 		beq	16f
+@@ -257,7 +311,7 @@
+ 	.macro	copy_abort_preamble
+ 19:	ldmfd	sp!, {r5 - r9}
+ 	b	21f
+-20:	ldmfd	sp!, {r5 - r8}
++20:	ldmfd	sp!, {r5 - r9}
+ 21:
+ 	.endm
+ 
+diff --git a/arch/arm/lib/copy_to_user.S b/arch/arm/lib/copy_to_user.S
+index d066df6..0affebc 100644
+--- a/arch/arm/lib/copy_to_user.S
++++ b/arch/arm/lib/copy_to_user.S
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/linkage.h>
+ #include <asm/assembler.h>
++#include <asm/cache.h>
+ 
+ /*
+  * Prototype:
+@@ -60,6 +61,13 @@
+ 	strusr	\reg, \ptr, 4, abort=\abort
+ 	.endm
+ 
++	.macro str4w ptr reg1 reg2 reg3 reg4 abort
++	str1w \ptr, \reg1, \abort
++	str1w \ptr, \reg2, \abort
++	str1w \ptr, \reg3, \abort
++	str1w \ptr, \reg4, \abort
++	.endm
++
+ 	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
+ 	str1w \ptr, \reg1, \abort
+ 	str1w \ptr, \reg2, \abort
+diff --git a/arch/arm/lib/memcpy.S b/arch/arm/lib/memcpy.S
+index a9b9e22..50a14da 100644
+--- a/arch/arm/lib/memcpy.S
++++ b/arch/arm/lib/memcpy.S
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/linkage.h>
+ #include <asm/assembler.h>
++#include <asm/cache.h>
+ 
+ #define LDR1W_SHIFT	0
+ #define STR1W_SHIFT	0
+@@ -36,6 +37,10 @@
+ 	W(str) \reg, [\ptr], #4
+ 	.endm
+ 
++	.macro str4w ptr reg1 reg2 reg3 reg4 abort
++	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4}
++	.endm
++
+ 	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
+ 	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4, \reg5, \reg6, \reg7, \reg8}
+ 	.endm
+diff --git a/arch/arm/lib/memset.S b/arch/arm/lib/memset.S
+index 650d592..c58da8a 100644
+--- a/arch/arm/lib/memset.S
++++ b/arch/arm/lib/memset.S
+@@ -40,7 +40,7 @@ ENTRY(memset)
+ 	cmp	r2, #16
+ 	blt	4f
+ 
+-#if ! CALGN(1)+0
++#if ! CALGN_MEMSET(1)+0
+ 
+ /*
+  * We need an extra register for this loop - save the return address and
+diff --git a/arch/arm/lib/memzero.S b/arch/arm/lib/memzero.S
+index 3fbdef5..0fb857f 100644
+--- a/arch/arm/lib/memzero.S
++++ b/arch/arm/lib/memzero.S
+@@ -40,7 +40,7 @@ ENTRY(__memzero)
+ 	cmp	r1, #16			@ 1 we can skip this chunk if we
+ 	blt	4f			@ 1 have < 16 bytes
+ 
+-#if ! CALGN(1)+0
++#if ! CALGN_MEMSET(1)+0
+ 
+ /*
+  * We need an extra register for this loop - save the return address and
+-- 
+1.7.9.5
+
