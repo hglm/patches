@@ -1,4 +1,4 @@
-From b1b14095b855c3e42e2171e27614393cd4f96668 Mon Sep 17 00:00:00 2001
+From 368295c4afaba407c610ee1eeaf243a07e1c64e3 Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Sun, 23 Jun 2013 00:50:17 +0200
 Subject: [PATCH] Optimize kernel memcpy/memset functions for ARM v6/v7
@@ -222,7 +222,7 @@ index 6ee2f67..74bfac1 100644
 +		ldmfd	sp!, {r4-r8, pc}		@	3
  ENDPROC(copy_page)
 diff --git a/arch/arm/lib/copy_template.S b/arch/arm/lib/copy_template.S
-index 805e3f8..d876698 100644
+index 805e3f8..9342c95 100644
 --- a/arch/arm/lib/copy_template.S
 +++ b/arch/arm/lib/copy_template.S
 @@ -64,21 +64,37 @@
@@ -358,9 +358,9 @@ index 805e3f8..d876698 100644
 +        PLD(    blt     13f                     )
 +.if PREFETCH_DISTANCE >= 4
 +	PLD(	pld	[r3, #(- 3 * L1_CACHE_BYTES)]	)
++.endif
 +.if PREFETCH_DISTANCE >= 3
 +	PLD(	pld	[r3, #(- 2 * L1_CACHE_BYTES)]	)
-+.endif
 +.endif
 +	PLD(	pld	[r3, #(- L1_CACHE_BYTES)]	)
 +
