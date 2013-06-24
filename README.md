@@ -25,7 +25,10 @@ copy_page and larger size memcpy. On armv7-based platforms a smaller, but
 nonetheless not insignificant benefit is seen. The changes keep using the
 regular register file, without using vfp or NEON, minimizing overhead. In
 its current form the patch may break older ARM architectures or (more
-likely) cause a performance regression for them.
+likely) cause a performance regression for them. Note that the specific
+optimizations that are optimal for a platform may depend highly on the
+details of the particular SOC implementation and may not be the same for
+platforms sharing the same ARM architecture.
 
 Tested platforms:
 
