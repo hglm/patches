@@ -1,4 +1,4 @@
-From 2e048bea2a769e5941491053817abcea16fc5703 Mon Sep 17 00:00:00 2001
+From 7a4c2c5198dfddd1ad647ffd31dd65595da4b9bd Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Mon, 24 Jun 2013 14:41:10 +0200
 Subject: [PATCH] Optimize kernel memcpy/memset functions for ARM v6/v7
@@ -11,13 +11,15 @@ alignment to 32 bytes in the memcpy variants (16-byte write
 alignment is also possible). For regular memcpy (as opposed to
 copy_from_user or copy_to_user), the alignment and tail code is
 optimized, using multiple word instead of single word loads and
-stores.
+stores. Write alignment is disabled for copy_from_user and
+copy_to_user.
 
 For memzero and memset, write alignment is enabled for armv6 with
 a seperate macro CALGN_MEMSET that regulates whether alignment
 code is emitted in the memset and memzero assembler functions.
-For armv7, write alignment did not show benefit in testing for
-memzero/memset.
+MEMSET_WRITE_ALIGNMENT_BYTES sets the number of bytes to align
+to (8 for armv6). For armv7, write alignment did not show benefit
+in testing for memzero/memset.
 
 The function copy_page is also optimized with L1_CACHE_BYTES
 aligned prefetches.
@@ -28,21 +30,25 @@ L1_CACHE_BYTES is equal to the preload offset used for
 prefetching. It defaults to 3 (96) for armv6 (L1_CACHE_BYTES ==
 32), and 3 (192) for armv7 (L1_CACHE_BYTES == 64).
 
+As a side-effect, memset now properly returns the original
+destination address in r0. This may fix issues compiling ARM
+kernels with gcc versions greater than 4.7.
+
 Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
 ---
- arch/arm/include/asm/assembler.h |   19 ++++-
+ arch/arm/include/asm/assembler.h |   24 ++++-
  arch/arm/include/asm/cache.h     |   12 +++
- arch/arm/lib/copy_from_user.S    |    6 ++
- arch/arm/lib/copy_page.S         |   64 +++++++++++----
- arch/arm/lib/copy_template.S     |  160 ++++++++++++++++++++++++++++++--------
- arch/arm/lib/copy_to_user.S      |    9 +++
+ arch/arm/lib/copy_from_user.S    |    7 ++
+ arch/arm/lib/copy_page.S         |   64 +++++++++----
+ arch/arm/lib/copy_template.S     |  188 +++++++++++++++++++++++++++++++-------
+ arch/arm/lib/copy_to_user.S      |   10 ++
  arch/arm/lib/memcpy.S            |    7 ++
- arch/arm/lib/memset.S            |   63 ++++++++-------
- arch/arm/lib/memzero.S           |   62 ++++++++-------
- 9 files changed, 297 insertions(+), 105 deletions(-)
+ arch/arm/lib/memset.S            |   89 ++++++++++--------
+ arch/arm/lib/memzero.S           |   97 ++++++++++++--------
+ 9 files changed, 376 insertions(+), 122 deletions(-)
 
 diff --git a/arch/arm/include/asm/assembler.h b/arch/arm/include/asm/assembler.h
-index 5c8b3bf4..df4b215 100644
+index 5c8b3bf4..5f3336f 100644
 --- a/arch/arm/include/asm/assembler.h
 +++ b/arch/arm/include/asm/assembler.h
 @@ -57,10 +57,13 @@
@@ -59,7 +65,7 @@ index 5c8b3bf4..df4b215 100644
  /*
   * This can be used to enable code to cacheline align the destination
   * pointer when bulk writing to memory.  Experiments on StrongARM and
-@@ -69,14 +72,28 @@
+@@ -69,14 +72,33 @@
   * is used).
   *
   * On Feroceon there is much to gain however, regardless of cache mode.
@@ -81,6 +87,11 @@ index 5c8b3bf4..df4b215 100644
 +
 +#if defined(CONFIG_CPU_FEROCEON) || __LINUX_ARM_ARCH__ == 6
 +#define CALGN_MEMSET(code...) code
++#if defined(CONFIG_CPU_FEROCEON)
++#define MEMSET_WRITE_ALIGN_BYTES 32
++#else
++#define MEMSET_WRITE_ALIGN_BYTES 8
++#endif
 +#else
 +#define CALGN_MEMSET(code...)
 +#endif
@@ -113,7 +124,7 @@ index 75fe66b..01e31e0 100644
   * sure that all such allocations are cache aligned. Otherwise,
   * unrelated code may cause parts of the buffer to be read into the
 diff --git a/arch/arm/lib/copy_from_user.S b/arch/arm/lib/copy_from_user.S
-index 66a477a..ca1122e 100644
+index 66a477a..1f66ea7 100644
 --- a/arch/arm/lib/copy_from_user.S
 +++ b/arch/arm/lib/copy_from_user.S
 @@ -12,6 +12,7 @@
@@ -124,7 +135,15 @@ index 66a477a..ca1122e 100644
  
  /*
   * Prototype:
-@@ -64,6 +65,10 @@
+@@ -39,6 +40,7 @@
+ #define LDR1W_SHIFT	1
+ #endif
+ #define STR1W_SHIFT	0
++#define COPY_FUNCTION_FROM_USER
+ 
+ 	.macro ldr1w ptr reg abort
+ 	ldrusr	\reg, \ptr, 4, abort=\abort
+@@ -64,6 +66,10 @@
  	W(str) \reg, [\ptr], #4
  	.endm
  
@@ -135,7 +154,7 @@ index 66a477a..ca1122e 100644
  	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
  	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4, \reg5, \reg6, \reg7, \reg8}
  	.endm
-@@ -83,6 +88,7 @@
+@@ -83,6 +89,7 @@
  	.endm
  
  	.text
@@ -230,10 +249,10 @@ index 6ee2f67..74bfac1 100644
 +		ldmfd	sp!, {r4-r8, pc}		@	3
  ENDPROC(copy_page)
 diff --git a/arch/arm/lib/copy_template.S b/arch/arm/lib/copy_template.S
-index 805e3f8..c840f96 100644
+index 805e3f8..ebb76d4 100644
 --- a/arch/arm/lib/copy_template.S
 +++ b/arch/arm/lib/copy_template.S
-@@ -64,47 +64,136 @@
+@@ -64,47 +64,158 @@
   *	Correction to be applied to the "ip" register when branching into
   *	the ldr1w or str1w instructions (some of these macros may expand to
   *	than one 32bit instruction in Thumb-2)
@@ -259,15 +278,34 @@ index 805e3f8..c840f96 100644
 + *      instead of nothing. When enabled, WRITE_ALIGN_BYTES defines the number
 + *      of bytes to align to (it must be 16 or 32).
 + *
-+ * REGULAR_MEMCPY
++ * COPY_FUNCTION_MEMCPY
 + *
-+ *      When REGULAR_MEMCPY is defined, there no need to use single word
++ *      When COPY_FUNCTION_MEMCPY is defined, there no need to use single word
 + *      loads and stores in the alignment and tail parts for the word aligned
 + *      case. This results in a measurable speed-up for modern ARM platforms.
++ *      Additionally, write alignment is disabled when COPY_FUNCTION_MEMCPY
++ *      is not defined.
++ *
++ * COPY_FUNCTION_FROM_USER
++ *
++ *      This is defined when compiling the copy_from_user function. The write
++ *      alignment code is disabled because it is slower (the main loop will
++ *      load single words any way, and the write alignment code only
++ *      constitutes overhead).
++ *
++ * COPY_FUNCTION_TO_USER
++ *
++ *      This is defined when compiling the copy_to_user and copy_to_user_std
++ *      functions. The write alignment code is disabled because it is slower
++ *      (the main loop will write single words any way, and the write alignment
++ *      code only constitutes overhead).
 + *
   */
  
--
++#ifndef COPY_FUNCTION_MEMCPY
++#define DISABLE_WRITE_ALIGNMENT
++#endif
+ 
  		enter	r4, lr
  
  		subs	r2, r2, #4
@@ -287,6 +325,7 @@ index 805e3f8..c840f96 100644
  
 -	CALGN(	ands	ip, r0, #31		)
 -	CALGN(	rsb	r3, ip, #32		)
++#ifndef DISABLE_WRITE_ALIGNMENT
 +	CALGN(	ands	ip, r0, #(WRITE_ALIGN_BYTES - 1)	)
 +	CALGN(	rsb	r3, ip, #WRITE_ALIGN_BYTES		)
  	CALGN(	sbcnes	r4, r3, r2		)  @ C is always set here
@@ -311,6 +350,7 @@ index 805e3f8..c840f96 100644
 +.endif
  	CALGN(	subs	r2, r2, r3		)  @ C gets set
  	CALGN(	add	pc, r4, ip		)
++#endif
 +#endif
  
 -	PLD(	pld	[r1, #0]		)
@@ -385,10 +425,14 @@ index 805e3f8..c840f96 100644
  		rsb	ip, ip, #32
  #if LDR1W_SHIFT > 0
  		lsl	ip, ip, #LDR1W_SHIFT
-@@ -142,8 +231,9 @@
+@@ -141,9 +252,12 @@
+ 		str1w	r0, r8, abort=20f
  		str1w	r0, lr, abort=20f
  
- 	CALGN(	bcs	2b			)
+-	CALGN(	bcs	2b			)
++#ifndef DISABLE_WRITE_ALIGNMENT
++	CALGN(	bcs	2b	)
++#endif
 +#endif	/* defined(REGULAR_MEMCPY) */
  
 -7:		ldmfd	sp!, {r5 - r8}
@@ -396,17 +440,19 @@ index 805e3f8..c840f96 100644
  
  8:		movs	r2, r2, lsl #31
  		ldr1b	r1, r3, ne, abort=21f
-@@ -180,22 +270,28 @@
+@@ -180,22 +294,30 @@
  		subs	r2, r2, #28
  		blt	14f
  
 -	CALGN(	ands	ip, r0, #31		)
 -	CALGN(	rsb	ip, ip, #32		)
++#ifndef DISABLE_WRITE_ALIGNMENT
 +	CALGN(	ands	ip, r0, #(WRITE_ALIGN_BYTES - 1)	)
 +	CALGN(	rsb	ip, ip, #WRITE_ALIGN_BYTES		)
  	CALGN(	sbcnes	r4, ip, r2		)  @ C is always set here
  	CALGN(	subcc	r2, r2, ip		)
  	CALGN(	bcc	15f			)
++#endif
  
 -11:		stmfd	sp!, {r5 - r9}
 -
@@ -437,7 +483,7 @@ index 805e3f8..c840f96 100644
  13:		ldr4w	r1, r4, r5, r6, r7, abort=19f
  		mov	r3, lr, pull #\pull
  		subs	r2, r2, #32
-@@ -217,10 +313,10 @@
+@@ -217,10 +339,10 @@
  		orr	ip, ip, lr, push #\push
  		str8w	r0, r3, r4, r5, r6, r7, r8, r9, ip, , abort=19f
  		bge	12b
@@ -451,7 +497,18 @@ index 805e3f8..c840f96 100644
  
  14:		ands	ip, r2, #28
  		beq	16f
-@@ -257,7 +353,7 @@
+@@ -231,8 +353,10 @@
+ 		orr	r3, r3, lr, push #\push
+ 		str1w	r0, r3, abort=21f
+ 		bgt	15b
++#ifndef DISABLE_WRITE_ALIGNMENT
+ 	CALGN(	cmp	r2, #0			)
+ 	CALGN(	bge	11b			)
++#endif
+ 
+ 16:		sub	r1, r1, #(\push / 8)
+ 		b	8b
+@@ -257,7 +381,7 @@
  	.macro	copy_abort_preamble
  19:	ldmfd	sp!, {r5 - r9}
  	b	21f
@@ -461,7 +518,7 @@ index 805e3f8..c840f96 100644
  	.endm
  
 diff --git a/arch/arm/lib/copy_to_user.S b/arch/arm/lib/copy_to_user.S
-index d066df6..921699a 100644
+index d066df6..b1b8058 100644
 --- a/arch/arm/lib/copy_to_user.S
 +++ b/arch/arm/lib/copy_to_user.S
 @@ -12,6 +12,7 @@
@@ -472,7 +529,15 @@ index d066df6..921699a 100644
  
  /*
   * Prototype:
-@@ -60,6 +61,13 @@
+@@ -39,6 +40,7 @@
+ #else
+ #define STR1W_SHIFT	1
+ #endif
++#define COPY_FUNCTION_TO_USER
+ 
+ 	.macro ldr1w ptr reg abort
+ 	W(ldr) \reg, [\ptr], #4
+@@ -60,6 +62,13 @@
  	strusr	\reg, \ptr, 4, abort=\abort
  	.endm
  
@@ -486,7 +551,7 @@ index d066df6..921699a 100644
  	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
  	str1w \ptr, \reg1, \abort
  	str1w \ptr, \reg2, \abort
-@@ -86,6 +94,7 @@
+@@ -86,6 +95,7 @@
  	.endm
  
  	.text
@@ -495,7 +560,7 @@ index d066df6..921699a 100644
  ENTRY(__copy_to_user_std)
  WEAK(__copy_to_user)
 diff --git a/arch/arm/lib/memcpy.S b/arch/arm/lib/memcpy.S
-index a9b9e22..9412809 100644
+index a9b9e22..82476ca 100644
 --- a/arch/arm/lib/memcpy.S
 +++ b/arch/arm/lib/memcpy.S
 @@ -12,9 +12,11 @@
@@ -506,7 +571,7 @@ index a9b9e22..9412809 100644
  
  #define LDR1W_SHIFT	0
  #define STR1W_SHIFT	0
-+#define REGULAR_MEMCPY
++#define COPY_FUNCTION_MEMCPY
  
  	.macro ldr1w ptr reg abort
  	W(ldr) \reg, [\ptr], #4
@@ -530,14 +595,16 @@ index a9b9e22..9412809 100644
  /* Prototype: void *memcpy(void *dest, const void *src, size_t n); */
  
 diff --git a/arch/arm/lib/memset.S b/arch/arm/lib/memset.S
-index 650d592..066c9ce 100644
+index 650d592..9aa7b26 100644
 --- a/arch/arm/lib/memset.S
 +++ b/arch/arm/lib/memset.S
-@@ -14,7 +14,6 @@
+@@ -13,8 +13,7 @@
+ #include <asm/assembler.h>
  
  	.text
- 	.align	5
+-	.align	5
 -	.word	0
++	.p2align 5
  
  1:	subs	r2, r2, #4		@ 1 do we have enough
  	blt	5f			@ 1 bytes to align with?
@@ -588,7 +655,7 @@ index 650d592..066c9ce 100644
  /*
   * No need to correct the count; we're only testing bits from now on
   */
-@@ -65,48 +67,51 @@ ENTRY(memset)
+@@ -65,48 +67,63 @@ ENTRY(memset)
  	stmneia	r0!, {r1, r3, ip, lr}
  	tst	r2, #16
  	stmneia	r0!, {r1, r3, ip, lr}
@@ -614,39 +681,57 @@ index 650d592..066c9ce 100644
 +	cmp	r2, #64
  	mov	ip, r1
  	mov	lr, r1
--
++	blt	7f
++.if MEMSET_WRITE_ALIGN_BYTES == 8
++	tst	r0, #4
++	beq	3f
+ 
 -	cmp	r2, #96
 -	tstgt	r0, #31
 -	ble	3f
-+	blt	7f
-+	tst	r0, #31
-+	beq	3f
- 
- 	and	ip, r0, #31
- 	rsb	ip, ip, #32
- 	sub	r2, r2, ip
- 	movs	ip, ip, lsl #(32 - 4)
+-
+-	and	ip, r0, #31
+-	rsb	ip, ip, #32
+-	sub	r2, r2, ip
+-	movs	ip, ip, lsl #(32 - 4)
 -	stmcsia	r0!, {r4, r5, r6, r7}
 -	stmmiia	r0!, {r4, r5}
-+	stmcsia	r0!, {r1, r3}
-+	stmcsia r0!, {r1, r3}
-+	stmmiia	r0!, {r1, r3}
- 	tst	ip, #(1 << 30)
+-	tst	ip, #(1 << 30)
 -	mov	ip, r1
-+	mov	ip, r3
++	cmp	r2, #68
++	str	r1, [r0], #4
++        sub	r2, r2, #4
++	blt     7f
++.else	/* MEMSET_WRITE_ALIGN_BYTES == 32 */
++	tst	r0, #31
++	beq	3f
++	tst     r0, #4
  	strne	r1, [r0], #4
++        subne	r2, r2, #4
++	tst     r0, #8
++	stmneia r0!, {r1, r3}
++        subne   r2, r2, #8
++	tst	r0, #16
++	stmneia r0!, {r1, r3}
++        subne   r2, r2, #16
++        stmneia r0!, {r1, r3}
++	cmp	r2, #64
++	blt	7f
++.endif
  
 -3:	subs	r2, r2, #64
 -	stmgeia	r0!, {r1, r3-r7, ip, lr}
 -	stmgeia	r0!, {r1, r3-r7, ip, lr}
-+3:	
-+	subs	r2, r2, #64
-+	stmgeia	r0!, {r1, r3, ip, lr}
-+	stmgeia	r0!, {r1, r3, ip, lr}
-+	stmgeia	r0!, {r1, r3, ip, lr}
-+	stmgeia	r0!, {r1, r3, ip, lr}
- 	bgt	3b
+-	bgt	3b
 -	ldmeqfd	sp!, {r4-r7, pc}
++3:	stmia	r0!, {r1, r3, ip, lr}
++	sub	r2, r2, #64
++	stmia	r0!, {r1, r3, ip, lr}
++	cmp     r2, #64
++	stmia	r0!, {r1, r3, ip, lr}
++	stmia	r0!, {r1, r3, ip, lr}
++	bge	3b
++	tst     r2, #63
 +	ldmeqfd	sp!, {r0, pc}
  
 -	tst	r2, #32
@@ -661,7 +746,7 @@ index 650d592..066c9ce 100644
  
  #endif
  
-@@ -122,6 +127,6 @@ ENTRY(memset)
+@@ -122,6 +139,6 @@ ENTRY(memset)
  	strneb	r1, [r0], #1
  	strneb	r1, [r0], #1
  	tst	r2, #1
@@ -671,7 +756,7 @@ index 650d592..066c9ce 100644
 +	ldmfd	sp!, {r0, pc}
  ENDPROC(memset)
 diff --git a/arch/arm/lib/memzero.S b/arch/arm/lib/memzero.S
-index 3fbdef5..d2b93c5 100644
+index 3fbdef5..5bcb3e7 100644
 --- a/arch/arm/lib/memzero.S
 +++ b/arch/arm/lib/memzero.S
 @@ -12,7 +12,6 @@
@@ -718,7 +803,7 @@ index 3fbdef5..d2b93c5 100644
  
  /*
   * We need an extra register for this loop - save the return address and
-@@ -72,39 +75,46 @@ ENTRY(__memzero)
+@@ -72,39 +75,61 @@ ENTRY(__memzero)
  /*
   * This version aligns the destination pointer in order to write
   * whole cache lines at once.
@@ -734,45 +819,70 @@ index 3fbdef5..d2b93c5 100644
 -	mov	r5, r2
 -	mov	r6, r2
 -	mov	r7, r2
--	mov	ip, r2
--	mov	lr, r2
 +6:	str	lr, [sp, #-4]!
- 
++
++	cmp	r1, #64
+ 	mov	ip, r2
+-	mov	lr, r2
+-
 -	cmp	r1, #96
 -	andgts	ip, r0, #31
 -	ble	3f
-+	cmp	r1, #64
-+	mov	ip, r2
-+	mov     lr, r2
-+	blt	7f
-+	ands	ip, r0, #31
-+	beq	3f
- 
- 	rsb	ip, ip, #32
- 	sub	r1, r1, ip
- 	movs	ip, ip, lsl #(32 - 4)
+-
+-	rsb	ip, ip, #32
+-	sub	r1, r1, ip
+-	movs	ip, ip, lsl #(32 - 4)
 -	stmcsia	r0!, {r4, r5, r6, r7}
 -	stmmiia	r0!, {r4, r5}
-+	stmcsia	r0!, {r2, r3}
-+	stmcsia	r0!, {r2, r3}
-+	stmmiia	r0!, {r2, r3}
- 	movs	ip, ip, lsl #2
-+	mov	ip, r2
- 	strcs	r2, [r0], #4
- 
- 3:	subs	r1, r1, #64
+-	movs	ip, ip, lsl #2
+-	strcs	r2, [r0], #4
+-
+-3:	subs	r1, r1, #64
 -	stmgeia	r0!, {r2-r7, ip, lr}
 -	stmgeia	r0!, {r2-r7, ip, lr}
-+	stmgeia	r0!, {r2, r3, ip, lr}
-+	stmgeia	r0!, {r2, r3, ip, lr}
-+	stmgeia	r0!, {r2, r3, ip, lr}
-+	stmgeia	r0!, {r2, r3, ip, lr}
- 	bgt	3b
+-	bgt	3b
 -	ldmeqfd	sp!, {r4-r7, pc}
-+	ldmeqfd	sp!, {pc}
- 
+-
 -	tst	r1, #32
 -	stmneia	r0!, {r2-r7, ip, lr}
++	mov     lr, r2
++	blt	7f
++
++.if MEMSET_WRITE_ALIGN_BYTES == 8
++	tst	r0, #4
++	beq	3f
++
++	cmp	r1, #68
++	str	r2, [r0], #4
++        sub	r1, r1, #4
++	blt     7f
++.else	/* MEMSET_WRITE_ALIGN_BYTES == 32 */
++	tst	r0, #31
++	beq	3f
++	tst     r0, #4
++	strne	r2, [r0], #4
++        subne	r1, r1, #4
++	tst     r0, #8
++	stmneia r0!, {r2, r3}
++        subne   r1, r1, #8
++	tst	r0, #16
++	stmneia r0!, {r2, r3}
++        subne   r1, r1, #16
++        stmneia r0!, {r2, r3}
++	cmp	r1, #64
++	blt	7f
++.endif
++
++3:	stmia	r0!, {r2, r3, ip, lr}
++	sub	r1, r1, #64
++	stmia	r0!, {r2, r3, ip, lr}
++	cmp	r1, #64
++	stmia	r0!, {r2, r3, ip, lr}
++	stmia	r0!, {r2, r3, ip, lr}
++	bge	3b
++	tst	r1, #63
++	ldmeqfd	sp!, {pc}
++
 +7:	tst	r1, #32
 +	stmneia	r0!, {r2, r3, ip, lr}
 +	stmneia	r0!, {r2, r3, ip, lr}
@@ -784,7 +894,7 @@ index 3fbdef5..d2b93c5 100644
  
  #endif
  
-@@ -120,6 +130,6 @@ ENTRY(__memzero)
+@@ -120,6 +145,6 @@ ENTRY(__memzero)
  	strneb	r2, [r0], #1		@ 1
  	strneb	r2, [r0], #1		@ 1
  	tst	r1, #1			@ 1 a byte left over

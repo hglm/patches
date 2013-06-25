@@ -30,6 +30,10 @@ optimizations that are optimal for a platform may depend highly on the
 details of the particular SOC implementation and may not be the same for
 platforms sharing the same ARM architecture.
 
+As a side-effect, the ARM memset function now properly returns the
+original destination in r0, which may help fix issues relating to
+compiling ARM kernels with gcc versions greater than 4.7.
+
 Tested platforms:
 
 - Raspberry Pi (armv6) with 3.6.y kernel.
