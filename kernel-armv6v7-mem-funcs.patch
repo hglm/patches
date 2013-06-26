@@ -1,4 +1,4 @@
-From 7a4c2c5198dfddd1ad647ffd31dd65595da4b9bd Mon Sep 17 00:00:00 2001
+From fd579a53dbc0e6b230a164aad061162b911e17a4 Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Mon, 24 Jun 2013 14:41:10 +0200
 Subject: [PATCH] Optimize kernel memcpy/memset functions for ARM v6/v7
@@ -36,16 +36,16 @@ kernels with gcc versions greater than 4.7.
 
 Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
 ---
- arch/arm/include/asm/assembler.h |   24 ++++-
- arch/arm/include/asm/cache.h     |   12 +++
- arch/arm/lib/copy_from_user.S    |    7 ++
- arch/arm/lib/copy_page.S         |   64 +++++++++----
- arch/arm/lib/copy_template.S     |  188 +++++++++++++++++++++++++++++++-------
- arch/arm/lib/copy_to_user.S      |   10 ++
- arch/arm/lib/memcpy.S            |    7 ++
- arch/arm/lib/memset.S            |   89 ++++++++++--------
- arch/arm/lib/memzero.S           |   97 ++++++++++++--------
- 9 files changed, 376 insertions(+), 122 deletions(-)
+ arch/arm/include/asm/assembler.h |   24 ++-
+ arch/arm/include/asm/cache.h     |   12 ++
+ arch/arm/lib/copy_from_user.S    |   18 ++
+ arch/arm/lib/copy_page.S         |   64 ++++--
+ arch/arm/lib/copy_template.S     |  409 ++++++++++++++++++++++++++++++++++----
+ arch/arm/lib/copy_to_user.S      |   21 ++
+ arch/arm/lib/memcpy.S            |   16 ++
+ arch/arm/lib/memset.S            |   89 +++++----
+ arch/arm/lib/memzero.S           |   97 +++++----
+ 9 files changed, 619 insertions(+), 131 deletions(-)
 
 diff --git a/arch/arm/include/asm/assembler.h b/arch/arm/include/asm/assembler.h
 index 5c8b3bf4..5f3336f 100644
@@ -124,7 +124,7 @@ index 75fe66b..01e31e0 100644
   * sure that all such allocations are cache aligned. Otherwise,
   * unrelated code may cause parts of the buffer to be read into the
 diff --git a/arch/arm/lib/copy_from_user.S b/arch/arm/lib/copy_from_user.S
-index 66a477a..1f66ea7 100644
+index 66a477a..0a969ea 100644
 --- a/arch/arm/lib/copy_from_user.S
 +++ b/arch/arm/lib/copy_from_user.S
 @@ -12,6 +12,7 @@
@@ -154,9 +154,21 @@ index 66a477a..1f66ea7 100644
  	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
  	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4, \reg5, \reg6, \reg7, \reg8}
  	.endm
-@@ -83,6 +89,7 @@
+@@ -82,7 +88,19 @@
+ 	ldmfd	sp!, {r0, \reg1, \reg2}
  	.endm
  
++	.macro enter_no_regs
++	mov	r3, #0
++	stmdb	sp!, {r0, r2, r3}
++	.endm
++
++	.macro exit_no_regs
++	add	sp, sp, #8
++	ldmfd sp!, {r0}
++	mov	pc, lr
++	.endm
++
  	.text
 +	.p2align 5
  
@@ -249,10 +261,10 @@ index 6ee2f67..74bfac1 100644
 +		ldmfd	sp!, {r4-r8, pc}		@	3
  ENDPROC(copy_page)
 diff --git a/arch/arm/lib/copy_template.S b/arch/arm/lib/copy_template.S
-index 805e3f8..ebb76d4 100644
+index 805e3f8..0eb4341 100644
 --- a/arch/arm/lib/copy_template.S
 +++ b/arch/arm/lib/copy_template.S
-@@ -64,47 +64,158 @@
+@@ -64,47 +64,354 @@
   *	Correction to be applied to the "ip" register when branching into
   *	the ldr1w or str1w instructions (some of these macros may expand to
   *	than one 32bit instruction in Thumb-2)
@@ -306,14 +318,198 @@ index 805e3f8..ebb76d4 100644
 +#define DISABLE_WRITE_ALIGNMENT
 +#endif
  
- 		enter	r4, lr
- 
+-		enter	r4, lr
+-
++#define OPTIMIZED_FUNCTION_ENTRY
++
++#ifdef OPTIMIZED_FUNCTION_ENTRY
++		/*
++                 * For small aligned memcpy/copy_to_user/copy_from_user
++                 * operations, the current implementation has some
++                 * overhead. By creating a fast path for common small
++                 * aligned requests, performance is increased. This
++		 * applies to both memcpy and copy_to/from_user.
++                 */
++		cmp	r2, #8
++		/* Calculate the aligned base for preloads. */
++		bic	ip, r1, #(L1_CACHE_BYTES - 1)
++		enter_no_regs
++		pld	[ip]
++		orr	r3, r0, r1
++		blt	36f
++		cmp	r2, #256
++		tstle	r3, #3
++		bne	37f
++
++		/*
++		 * At this point, we have a small (<= 128 bytes) word-aligned
++		 * request of size of 8 bytes or greater.
++		 */
++.macro check_preload bytes_to_go
++.if \bytes_to_go >= (PREFETCH_DISTANCE * L1_CACHE_BYTES)
++	PLD(	pld     [r1, r5]	)
++	NO_PLD(	nop )
++.else
++		nop
++.endif
++.endm
++#ifdef COPY_FUNCTION_MEMCPY
++	PLD(	pld	[ip, #L1_CACHE_BYTES] )
++		stmdb	sp!, {r4, r5, lr}
++		bic	r3, r2, #15
++		/*
++                 * Use a heuristic to determine whether the preload
++		 * at aligned_base + 2 * L1_CACHE_BYTES will be useful.
++		 */
++		cmp	r2, #(2 * L1_CACHE_BYTES - L1_CACHE_BYTES / 2)
++	PLD(	add	r5, ip, #(3 * L1_CACHE_BYTES) )
++		sub	r2, r2, r3
++	PLD(	blt	40f	)
++	PLD(	pld	[ip, #(2 * L1_CACHE_BYTES)] )
++40:		rsb	r3, r3, #256
++	PLD(	sub	r5, r5, r1		)
++		add	pc, pc, r3
++		nop
++		/* 256 bytes to go. */
++		check_preload 256
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 240 bytes go. */
++		nop
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 224 bytes to go. */
++		check_preload 224
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 204 bytes go. */
++		nop
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 192 bytes to go. */
++		check_preload 192
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 176 bytes go. */
++		nop
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 160 bytes to go. */
++		check_preload 160
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 144 bytes go. */
++		nop
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 128 bytes to go. */
++		check_preload 128
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 112 bytes go. */
++		nop
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 96 bytes to go. */
++		check_preload 96
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 90 bytes to go. */
++		nop
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		/* 64 bytes to go. */
++		check_preload 64
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		nop
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		nop
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		nop
++		ldmia	r1!, {r3, r4, ip, lr}
++		nop
++		stmia	r0!, {r3, r4, ip, lr}
++		tst	r2, #8
++		ldrne	ip, [r1], #4
++		ldrne	r3, [r1], #4
++		strne	ip, [r0], #4
++		strne	r3, [r0], #4
++		tst	r2, #4
++		ldmfd	sp!, {r4, r5, lr}
++		ldrne	ip, [r1], #4
++		strne	ip, [r0], #4
++		tst	r2, #3
++		ldmeqfd	sp!, {r0}
++		moveq	pc, lr
++		b	38f
++#else
++32:		ldr1w	r1, r3, abort=22f
++		cmp	r2, #16
++		ldr1w	r1, ip, abort=22f
++		str1w	r0, r3, abort=22f
++		sub	r2, r2, #8
++		str1w	r0, ip, abort=22f
++		bge	32b
++		tst	r2, #4
++		beq	34f
++		ldr1w	r1, r3, abort=22f
++		str1w	r0, r3, abort=22f
++#endif
++34:		tst	r2, #3
++		bne	38f
++		exit_no_regs
++
++36:		/*
++                 * At this point, we have < 8 bytes that may not be aligned.
++		 * This code is optimized for < 4 bytes or word aligned
++		 * source and destination; otherwise, branch to the general
++		 * case.
++                 */
  		subs	r2, r2, #4
-+		bic     r3, r1, #(L1_CACHE_BYTES - 1)
++		blt	38f
++		tst	r3, #3
++		bne	35f
++		ldr1w	r1, r3, abort=22f
++		teq	r2, #0
++		str1w	r0, r3, abort=22f
++		beq	39f
++38:		movs	r2, r2, lsl #31
++		ldr1b	r1, r3, ne, abort=22f
++		ldr1b	r1, ip, cs, abort=22f
++		str1b	r0, r3, ne, abort=22f
++		ldr1b	r1, r3, cs, abort=22f
++		str1b	r0, ip, cs, abort=22f
++		str1b	r0, r3, cs, abort=22f
++39:		exit_no_regs
++#endif
++
++35:		add	r2, r2, #4
++37:		stmdb	sp!, {r4, lr}
++
++33:		subs	r2, r2, #4
++		mov	r3, ip
  		blt	8f
  		ands	ip, r0, #3
 -	PLD(	pld	[r1, #0]		)
-+	PLD(	pld	[r3]			)
++	PLD(	pld	[r3, #L1_CACHE_BYTES]	)
  		bne	9f
  		ands	ip, r1, #3
  		bne	10f
@@ -321,6 +517,7 @@ index 805e3f8..ebb76d4 100644
  1:		subs	r2, r2, #(28)
 -		stmfd	sp!, {r5 - r8}
 +		stmfd	sp!, {r5 - r9}
++		mov	r8, r3
  		blt	5f
  
 -	CALGN(	ands	ip, r0, #31		)
@@ -330,7 +527,7 @@ index 805e3f8..ebb76d4 100644
 +	CALGN(	rsb	r3, ip, #WRITE_ALIGN_BYTES		)
  	CALGN(	sbcnes	r4, r3, r2		)  @ C is always set here
  	CALGN(	bcs	2f			)
-+#ifdef REGULAR_MEMCPY
++#ifdef COPY_FUNCTION_MEMCPY
 +	CALGN(	tst     r3, #4			)
 +	CALGN(	ldrne   r4, [r1], #4		)
 +	CALGN(	strne   r4, [r0], #4		)
@@ -356,27 +553,41 @@ index 805e3f8..ebb76d4 100644
 -	PLD(	pld	[r1, #0]		)
 -2:	PLD(	subs	r2, r2, #96		)
 -	PLD(	pld	[r1, #28]		)
+-	PLD(	blt	4f			)
+-	PLD(	pld	[r1, #60]		)
+-	PLD(	pld	[r1, #92]		)
+-
+-3:	PLD(	pld	[r1, #124]		)
 +2:
 +.if L1_CACHE_BYTES == 64
 +		subs    r2, r2, #32
 +		blt     30f
 +.endif
++		/*
++                 * Assume a preload at aligned base + 2 * L1_CACHE_BYTES will
++		 * be useful.
++		 */
++	PLD(	pld	[r8, #(2 * L1_CACHE_BYTES)]	)
++
 +	PLD(	add     r9, r1, #(PREFETCH_DISTANCE * L1_CACHE_BYTES)	)
 +	PLD(	bic     r3, r9, #(L1_CACHE_BYTES - 1)			)
 +	PLD(	subs	r2, r2, #(PREFETCH_DISTANCE * L1_CACHE_BYTES)	)
-+	PLD(	sub	r9, r3, r1		)
- 	PLD(	blt	4f			)
--	PLD(	pld	[r1, #60]		)
--	PLD(	pld	[r1, #92]		)
--
--3:	PLD(	pld	[r1, #124]		)
-+.if PREFETCH_DISTANCE >= 4
-+	PLD(	pld	[r3, #(- 3 * L1_CACHE_BYTES)]	)
-+.endif
-+.if PREFETCH_DISTANCE >= 3
-+	PLD(	pld	[r3, #(- 2 * L1_CACHE_BYTES)]	)
-+.endif
-+	PLD(	pld	[r3, #(- L1_CACHE_BYTES)]	)
++	PLD(	sub	r9, r3, r1			)
++	PLD(	add	r8, #(3 * L1_CACHE_BYTES)	)
++	PLD(	blt	4f				)
++
++		/*
++        	 * "Catch-up" the early preloads (which have been performed up
++		 * to aligned base + 2 * L1_CACHE_BYTES) to the preload offset
++		 * used in the main loop.
++	         */
++	PLD(	cmp	r8, r3				)
++	PLD(	bge	41f				)
++42:	PLD(	add	r8, r8, #L1_CACHE_BYTES		)
++	PLD(	cmp	r8, r3				)
++	PLD(	pld	[r8, #(- L1_CACHE_BYTES)]	)
++	PLD(	blt	42b				)
++41:
 +
 +.if L1_CACHE_BYTES == 32
 +3:	PLD(	pld	[r1, r9]		)
@@ -409,7 +620,7 @@ index 805e3f8..ebb76d4 100644
 +.endif
 +
 +5:
-+#ifdef REGULAR_MEMCPY
++#ifdef COPY_FUNCTION_MEMCPY
 +		tst     r2, #16
 +		ldmneia r1!, {r4-r7}
 +		stmneia r0!, {r4-r7}
@@ -425,7 +636,7 @@ index 805e3f8..ebb76d4 100644
  		rsb	ip, ip, #32
  #if LDR1W_SHIFT > 0
  		lsl	ip, ip, #LDR1W_SHIFT
-@@ -141,9 +252,12 @@
+@@ -141,9 +448,12 @@
  		str1w	r0, r8, abort=20f
  		str1w	r0, lr, abort=20f
  
@@ -433,14 +644,24 @@ index 805e3f8..ebb76d4 100644
 +#ifndef DISABLE_WRITE_ALIGNMENT
 +	CALGN(	bcs	2b	)
 +#endif
-+#endif	/* defined(REGULAR_MEMCPY) */
++#endif	/* defined(COPY_FUNCTION_MEMCPY) */
  
 -7:		ldmfd	sp!, {r5 - r8}
 +7:		ldmfd	sp!, {r5 - r9}
  
  8:		movs	r2, r2, lsl #31
  		ldr1b	r1, r3, ne, abort=21f
-@@ -180,22 +294,30 @@
+@@ -153,7 +463,8 @@
+ 		str1b	r0, r4, cs, abort=21f
+ 		str1b	r0, ip, cs, abort=21f
+ 
+-		exit	r4, pc
++		ldmfd	sp!, {r4, lr}
++		exit_no_regs
+ 
+ 9:		rsb	ip, ip, #4
+ 		cmp	ip, #2
+@@ -180,22 +491,36 @@
  		subs	r2, r2, #28
  		blt	14f
  
@@ -452,8 +673,7 @@ index 805e3f8..ebb76d4 100644
  	CALGN(	sbcnes	r4, ip, r2		)  @ C is always set here
  	CALGN(	subcc	r2, r2, ip		)
  	CALGN(	bcc	15f			)
-+#endif
- 
+-
 -11:		stmfd	sp!, {r5 - r9}
 -
 -	PLD(	pld	[r1, #0]		)
@@ -464,6 +684,14 @@ index 805e3f8..ebb76d4 100644
 -	PLD(	pld	[r1, #92]		)
 -
 -12:	PLD(	pld	[r1, #124]		)
++#endif
++		/*
++		 * We need the aligned base used for early preloads,
++		 * but because this is an entry point from multiple
++		 * code paths, we don't have the value available in
++		 * all cases and so cannot match up the early preloads
++		 * with the preloads in the main loop.
++		 */
 +11:		stmfd	sp!, {r5 - r10}
 +
 +        PLD(    add     r10, r1, #(PREFETCH_DISTANCE * L1_CACHE_BYTES)	)
@@ -483,7 +711,7 @@ index 805e3f8..ebb76d4 100644
  13:		ldr4w	r1, r4, r5, r6, r7, abort=19f
  		mov	r3, lr, pull #\pull
  		subs	r2, r2, #32
-@@ -217,10 +339,10 @@
+@@ -217,10 +542,10 @@
  		orr	ip, ip, lr, push #\push
  		str8w	r0, r3, r4, r5, r6, r7, r8, r9, ip, , abort=19f
  		bge	12b
@@ -497,7 +725,7 @@ index 805e3f8..ebb76d4 100644
  
  14:		ands	ip, r2, #28
  		beq	16f
-@@ -231,8 +353,10 @@
+@@ -231,8 +556,10 @@
  		orr	r3, r3, lr, push #\push
  		str1w	r0, r3, abort=21f
  		bgt	15b
@@ -508,17 +736,27 @@ index 805e3f8..ebb76d4 100644
  
  16:		sub	r1, r1, #(\push / 8)
  		b	8b
-@@ -257,7 +381,7 @@
+@@ -255,13 +582,13 @@
+  */
+ 
  	.macro	copy_abort_preamble
- 19:	ldmfd	sp!, {r5 - r9}
+-19:	ldmfd	sp!, {r5 - r9}
++19:	ldmfd	sp!, {r5 - r10}
  	b	21f
 -20:	ldmfd	sp!, {r5 - r8}
+-21:
 +20:	ldmfd	sp!, {r5 - r9}
- 21:
++21:	ldmfd	sp!, {r4, lr}
++22:
  	.endm
  
+ 	.macro	copy_abort_end
+-	ldmfd	sp!, {r4, pc}
++	exit_no_regs
+ 	.endm
+-
 diff --git a/arch/arm/lib/copy_to_user.S b/arch/arm/lib/copy_to_user.S
-index d066df6..b1b8058 100644
+index d066df6..b2902a2 100644
 --- a/arch/arm/lib/copy_to_user.S
 +++ b/arch/arm/lib/copy_to_user.S
 @@ -12,6 +12,7 @@
@@ -551,16 +789,28 @@ index d066df6..b1b8058 100644
  	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
  	str1w \ptr, \reg1, \abort
  	str1w \ptr, \reg2, \abort
-@@ -86,6 +95,7 @@
+@@ -85,7 +94,19 @@
+ 	ldmfd	sp!, {r0, \reg1, \reg2}
  	.endm
  
++	.macro enter_no_regs
++	mov	r3, #0
++	stmdb	sp!, {r0, r2, r3}
++	.endm
++
++	.macro exit_no_regs
++	add	sp, sp, #8
++	ldmfd sp!, {r0}
++	mov	pc, lr
++	.endm
++
  	.text
 +	.p2align 5
  
  ENTRY(__copy_to_user_std)
  WEAK(__copy_to_user)
 diff --git a/arch/arm/lib/memcpy.S b/arch/arm/lib/memcpy.S
-index a9b9e22..82476ca 100644
+index a9b9e22..b44babc 100644
 --- a/arch/arm/lib/memcpy.S
 +++ b/arch/arm/lib/memcpy.S
 @@ -12,9 +12,11 @@
@@ -586,9 +836,19 @@ index a9b9e22..82476ca 100644
  	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
  	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4, \reg5, \reg6, \reg7, \reg8}
  	.endm
-@@ -53,6 +59,7 @@
+@@ -52,7 +58,17 @@
+ 	ldmfd sp!, {r0, \reg1, \reg2}
  	.endm
  
++	.macro enter_no_regs
++	stmdb sp!, {r0}
++	.endm
++
++	.macro exit_no_regs
++	ldmfd sp!, {r0}
++	mov pc, lr
++	.endm
++
  	.text
 +	.p2align 5
  
