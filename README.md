@@ -13,17 +13,18 @@ Tested platforms:
 - Raspberry Pi with 3.6.y kernel.
 - Allwinner A10 linux-sunxi platform with 3.4.x kernel.
 
-kernel-armv6v7-mem-funcs.patch is a patch for the Linux kernel to bring up
-to date the ARM-optimized memory copy and fill functions, which are for a
-large part still optimized for older ARM platforms and do not perform
-optimally on more recent platforms. The patch supports both armv6 (line
-size 32 bytes) and armv7 (line size 64 bytes) platforms. The patch
-implements changes to the prefetch strategy and other optimizations. On
-certain platforms, such as the armv6-based Raspberry Pi, a significant speed
-improvement (on the order of 70%) is seen for important functions like
-copy_page and larger size memcpy. On armv7-based platforms a smaller, but
-nonetheless not insignificant benefit is seen. The changes keep using the
-regular register file, without using vfp or NEON, minimizing overhead. In
+kernel-armv6v7-mem-funcs.patch is a work-in-progress experimental patch
+for the Linux kernel to bring up to date the ARM-optimized memory copy
+and fill functions, which are for a large part still optimized for older
+ARM platforms and do not perform optimally on more recent platforms.
+The patch supports both armv6 (line size 32 bytes) and armv7 (line size
+64 bytes) platforms. The patch implements changes to the prefetch
+strategy and other optimizations. On certain platforms, such as the
+ armv6-based Raspberry Pi, a significant speed improvement (on the order
+of 70%) is seen for important functions like copy_page and larger size
+memcpy. On armv7-based platforms a smaller, but nonetheless not
+insignificant benefit is seen. The changes keep using the regular
+register file, without using vfp or NEON, minimizing overhead. In
 its current form the patch may break older ARM architectures or (more
 likely) cause a performance regression for them. Note that the specific
 optimizations that are optimal for a platform may depend highly on the
