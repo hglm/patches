@@ -38,6 +38,7 @@ compiling ARM kernels with gcc versions greater than 4.7.
 Tested platforms:
 
 - Raspberry Pi (armv6) with 3.6.y kernel.
+- Allwinner A10 linux-sunxi platform with 3.4.43 kernel, gcc 4.7 and 4.8
 
 sunxifb/ holds mostly obsolete patches for the xf86-video-sunxifb driver
 corresponding to the various-optimizations branch.
