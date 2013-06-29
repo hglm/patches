@@ -33,7 +33,11 @@ platforms sharing the same ARM architecture.
 
 As a side-effect, the ARM memset function now properly returns the
 original destination in r0, which may help fix issues relating to
-compiling ARM kernels with gcc versions greater than 4.7.
+compiling ARM kernels with gcc versions greater than 4.7. However,
+newer kernels (such as stable 3.9.x) already contain a fix for this;
+the patch will not apply cleanly in this case. A version of this
+patch that can be applied against the newer kernels will be made
+available soon.
 
 Tested platforms:
 

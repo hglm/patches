@@ -1,4 +1,4 @@
-From fd579a53dbc0e6b230a164aad061162b911e17a4 Mon Sep 17 00:00:00 2001
+From d8c2c0b0e6a4e0d0f549114942953182d28e6a0c Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Mon, 24 Jun 2013 14:41:10 +0200
 Subject: [PATCH] Optimize kernel memcpy/memset functions for ARM v6/v7
@@ -12,7 +12,9 @@ alignment is also possible). For regular memcpy (as opposed to
 copy_from_user or copy_to_user), the alignment and tail code is
 optimized, using multiple word instead of single word loads and
 stores. Write alignment is disabled for copy_from_user and
-copy_to_user.
+copy_to_user. There is also a new fast path for the common case of
+smaller word aligned sizes, which reduces overhead and speeds up
+small requests.
 
 For memzero and memset, write alignment is enabled for armv6 with
 a seperate macro CALGN_MEMSET that regulates whether alignment
@@ -32,20 +34,22 @@ prefetching. It defaults to 3 (96) for armv6 (L1_CACHE_BYTES ==
 
 As a side-effect, memset now properly returns the original
 destination address in r0. This may fix issues compiling ARM
-kernels with gcc versions greater than 4.7.
+kernels with gcc versions greater than 4.7. Kernels greater
+than 3.9 may already contain a fix for this (which has been
+merged into this patch).
 
 Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
 ---
- arch/arm/include/asm/assembler.h |   24 ++-
- arch/arm/include/asm/cache.h     |   12 ++
+ arch/arm/include/asm/assembler.h |   24 +-
+ arch/arm/include/asm/cache.h     |   12 +
  arch/arm/lib/copy_from_user.S    |   18 ++
- arch/arm/lib/copy_page.S         |   64 ++++--
- arch/arm/lib/copy_template.S     |  409 ++++++++++++++++++++++++++++++++++----
+ arch/arm/lib/copy_page.S         |   64 +++--
+ arch/arm/lib/copy_template.S     |  491 ++++++++++++++++++++++++++++++++++----
  arch/arm/lib/copy_to_user.S      |   21 ++
  arch/arm/lib/memcpy.S            |   16 ++
- arch/arm/lib/memset.S            |   89 +++++----
- arch/arm/lib/memzero.S           |   97 +++++----
- 9 files changed, 619 insertions(+), 131 deletions(-)
+ arch/arm/lib/memset.S            |  142 ++++++-----
+ arch/arm/lib/memzero.S           |   97 +++++---
+ 9 files changed, 726 insertions(+), 159 deletions(-)
 
 diff --git a/arch/arm/include/asm/assembler.h b/arch/arm/include/asm/assembler.h
 index 5c8b3bf4..5f3336f 100644
@@ -261,10 +265,10 @@ index 6ee2f67..74bfac1 100644
 +		ldmfd	sp!, {r4-r8, pc}		@	3
  ENDPROC(copy_page)
 diff --git a/arch/arm/lib/copy_template.S b/arch/arm/lib/copy_template.S
-index 805e3f8..0eb4341 100644
+index 805e3f8..4b28b2b 100644
 --- a/arch/arm/lib/copy_template.S
 +++ b/arch/arm/lib/copy_template.S
-@@ -64,47 +64,354 @@
+@@ -64,47 +64,429 @@
   *	Correction to be applied to the "ip" register when branching into
   *	the ldr1w or str1w instructions (some of these macros may expand to
   *	than one 32bit instruction in Thumb-2)
@@ -314,15 +318,47 @@ index 805e3f8..0eb4341 100644
 + *
   */
  
-+#ifndef COPY_FUNCTION_MEMCPY
++#ifdef COPY_FUNCTION_MEMCPY
++/* The small size threshold must be >= 15 for COPY_FUNCTION_MEMCPY. */
++#define SMALL_SIZE_THRESHOLD 15
++/*
++ * For regular memcpy, we have a fast path handling up to 256 bytes for
++ * word aligned requests. Because the fast path doesn't do write aligning,
++ * on platforms that appreciate write aligning setting the threshold to a
++ * lower value than 256 bytes might have a benefit.
++ */
++#define FAST_PATH_SIZE_THRESHOLD 256
++#endif
++#ifdef COPY_FUNCTION_FROM_USER
++#define SMALL_SIZE_THRESHOLD 8
++#define FAST_PATH_SIZE_THRESHOLD 95
++/*
++ * For copy_from_user, the fast path is unoptimal for sizes greater or
++ * equal to about 96 bytes.
++ */
++#define DISABLE_WRITE_ALIGNMENT
++#endif
++#ifdef COPY_FUNCTION_TO_USER
++#define SMALL_SIZE_THRESHOLD 8
++/*
++ * When copy_to_user_memcpy is enabled in the kernel configuration
++ * (CONFIG_UACCESS_WITH_MEMCPY), the assembler copy_to_user function
++ * will only be called for sizes less than 64 bytes. Ideally, the
++ * fast path threshold for copy_to_user should be 63 or higher to
++ * avoid the non-fast path code completely.
++ *
++ * Otherwise, it seems the fast path is faster or almost as fast even
++ * for larger sizes.
++ */
++#define FAST_PATH_SIZE_THRESHOLD 256
 +#define DISABLE_WRITE_ALIGNMENT
 +#endif
  
 -		enter	r4, lr
 -
-+#define OPTIMIZED_FUNCTION_ENTRY
++#define OPTIMIZE_WITH_FAST_PATH
 +
-+#ifdef OPTIMIZED_FUNCTION_ENTRY
++#ifdef OPTIMIZE_WITH_FAST_PATH
 +		/*
 +                 * For small aligned memcpy/copy_to_user/copy_from_user
 +                 * operations, the current implementation has some
@@ -330,30 +366,33 @@ index 805e3f8..0eb4341 100644
 +                 * aligned requests, performance is increased. This
 +		 * applies to both memcpy and copy_to/from_user.
 +                 */
-+		cmp	r2, #8
++		cmp	r2, #SMALL_SIZE_THRESHOLD
 +		/* Calculate the aligned base for preloads. */
 +		bic	ip, r1, #(L1_CACHE_BYTES - 1)
 +		enter_no_regs
 +		pld	[ip]
 +		orr	r3, r0, r1
-+		blt	36f
-+		cmp	r2, #256
++		ble	36f
++		cmp	r2, #FAST_PATH_SIZE_THRESHOLD
 +		tstle	r3, #3
 +		bne	37f
 +
 +		/*
-+		 * At this point, we have a small (<= 128 bytes) word-aligned
-+		 * request of size of 8 bytes or greater.
++		 * At this point, we have a small (<= FAST_PATH_SIZE_THRESHOLD
++		 * bytes) word-aligned request of size greater than
++		 * SMALL_SIZE_THRESHOLD, which must be >= 15 so the size
++		 * is >= 16 when we get here.
 +		 */
++#ifdef COPY_FUNCTION_MEMCPY
 +.macro check_preload bytes_to_go
-+.if \bytes_to_go >= (PREFETCH_DISTANCE * L1_CACHE_BYTES)
++.if \bytes_to_go >= (PREFETCH_DISTANCE * L1_CACHE_BYTES) && \
++(\bytes_to_go % L1_CACHE_BYTES) == 0
 +	PLD(	pld     [r1, r5]	)
 +	NO_PLD(	nop )
 +.else
 +		nop
 +.endif
 +.endm
-+#ifdef COPY_FUNCTION_MEMCPY
 +	PLD(	pld	[ip, #L1_CACHE_BYTES] )
 +		stmdb	sp!, {r4, r5, lr}
 +		bic	r3, r2, #15
@@ -361,7 +400,7 @@ index 805e3f8..0eb4341 100644
 +                 * Use a heuristic to determine whether the preload
 +		 * at aligned_base + 2 * L1_CACHE_BYTES will be useful.
 +		 */
-+		cmp	r2, #(2 * L1_CACHE_BYTES - L1_CACHE_BYTES / 2)
++	PLD(	cmp	r2, #(2 * L1_CACHE_BYTES - L1_CACHE_BYTES / 2)	)
 +	PLD(	add	r5, ip, #(3 * L1_CACHE_BYTES) )
 +		sub	r2, r2, r3
 +	PLD(	blt	40f	)
@@ -443,15 +482,25 @@ index 805e3f8..0eb4341 100644
 +		ldmia	r1!, {r3, r4, ip, lr}
 +		nop
 +		stmia	r0!, {r3, r4, ip, lr}
-+		nop
++		/* At this point there are 16 to 31 bytes to go. */
++		tst	r2, #15
 +		ldmia	r1!, {r3, r4, ip, lr}
-+		nop
++		cmpne	r2, #8
++		/*
++		 * If r2 == 8, we need to clear the eq flag while
++		 * making sure carry remains set.
++		 */
++		tsteq	r2, #15
 +		stmia	r0!, {r3, r4, ip, lr}
-+		tst	r2, #8
-+		ldrne	ip, [r1], #4
-+		ldrne	r3, [r1], #4
-+		strne	ip, [r0], #4
-+		strne	r3, [r0], #4
++		/*
++		 * The equal is set if there are no bytes left.
++		 * The carry flag is set is there are >= 8 bytes left.
++		 */
++		beq	43f
++		ldrcs	ip, [r1], #4
++		ldrcs	r3, [r1], #4
++		strcs	ip, [r0], #4
++		strcs	r3, [r0], #4
 +		tst	r2, #4
 +		ldmfd	sp!, {r4, r5, lr}
 +		ldrne	ip, [r1], #4
@@ -460,7 +509,16 @@ index 805e3f8..0eb4341 100644
 +		ldmeqfd	sp!, {r0}
 +		moveq	pc, lr
 +		b	38f
++43:		ldmfd	sp!, {r4, r5, lr}
++		ldmfd	sp!, {r0}
++		mov	pc, lr
 +#else
++		/*
++                 * For copy_to_user and copy_from_user, the fast path
++		 * uses single word loads and stores, but due to the
++		 * decreased overhead this can be a big win for small
++		 * sizes which are very common.
++		 */
 +32:		ldr1w	r1, r3, abort=22f
 +		cmp	r2, #16
 +		ldr1w	r1, ip, abort=22f
@@ -478,18 +536,22 @@ index 805e3f8..0eb4341 100644
 +		exit_no_regs
 +
 +36:		/*
-+                 * At this point, we have < 8 bytes that may not be aligned.
-+		 * This code is optimized for < 4 bytes or word aligned
-+		 * source and destination; otherwise, branch to the general
-+		 * case.
++                 * At this point, we have <= SMALL_SIZE_THRESHOLD bytes that
++		 * may not be aligned. This code is optimized for < 4 bytes
++		 * or word aligned source and destination; otherwise, branch
++		 * to the general case.
 +                 */
- 		subs	r2, r2, #4
++		cmp	r2, #4
 +		blt	38f
 +		tst	r3, #3
++		sub	r2, r2, #3
 +		bne	35f
-+		ldr1w	r1, r3, abort=22f
-+		teq	r2, #0
++		/* Word aligned source and destination, >= 4 bytes. */
++44:		ldr1w	r1, r3, abort=22f
+ 		subs	r2, r2, #4
 +		str1w	r0, r3, abort=22f
++		bgt	44b
++		adds	r2, r2, #3
 +		beq	39f
 +38:		movs	r2, r2, lsl #31
 +		ldr1b	r1, r3, ne, abort=22f
@@ -499,14 +561,26 @@ index 805e3f8..0eb4341 100644
 +		str1b	r0, ip, cs, abort=22f
 +		str1b	r0, r3, cs, abort=22f
 +39:		exit_no_regs
-+#endif
 +
-+35:		add	r2, r2, #4
++35:		add	r2, r2, #3
++#endif	/* defined(OPTIMIZE_WITH_FAST_PATH) */
++		/*
++		 * This is the entry point of the original function.
++		 * ip holds the aligned source base address.
++		 */
 +37:		stmdb	sp!, {r4, lr}
 +
 +33:		subs	r2, r2, #4
 +		mov	r3, ip
++#if !defined(COPY_FUNCTION_MEMCPY) || !defined(OPTIMIZE_WITH_FAST_PATH)
++		/*
++		 * When both COPY_FUNCTION_MEMCPY and
++		 * OPTIMIZE_WITH_FAST_PATH are defined, r2 is guaranteed
++		 * to be greater than or equal to 4, so we can skip the
++		 * conditional branch.
++		 */
  		blt	8f
++#endif
  		ands	ip, r0, #3
 -	PLD(	pld	[r1, #0]		)
 +	PLD(	pld	[r3, #L1_CACHE_BYTES]	)
@@ -528,6 +602,7 @@ index 805e3f8..0eb4341 100644
  	CALGN(	sbcnes	r4, r3, r2		)  @ C is always set here
  	CALGN(	bcs	2f			)
 +#ifdef COPY_FUNCTION_MEMCPY
++		/* For regular memcpy, use conditional multiloads/stores. */
 +	CALGN(	tst     r3, #4			)
 +	CALGN(	ldrne   r4, [r1], #4		)
 +	CALGN(	strne   r4, [r0], #4		)
@@ -621,6 +696,10 @@ index 805e3f8..0eb4341 100644
 +
 +5:
 +#ifdef COPY_FUNCTION_MEMCPY
++		/*
++		 * For regular memcpy, use conditional multiloads/stores
++		 * for the tail.
++		 */
 +		tst     r2, #16
 +		ldmneia r1!, {r4-r7}
 +		stmneia r0!, {r4-r7}
@@ -636,7 +715,7 @@ index 805e3f8..0eb4341 100644
  		rsb	ip, ip, #32
  #if LDR1W_SHIFT > 0
  		lsl	ip, ip, #LDR1W_SHIFT
-@@ -141,9 +448,12 @@
+@@ -141,9 +523,12 @@
  		str1w	r0, r8, abort=20f
  		str1w	r0, lr, abort=20f
  
@@ -651,7 +730,7 @@ index 805e3f8..0eb4341 100644
  
  8:		movs	r2, r2, lsl #31
  		ldr1b	r1, r3, ne, abort=21f
-@@ -153,7 +463,8 @@
+@@ -153,7 +538,8 @@
  		str1b	r0, r4, cs, abort=21f
  		str1b	r0, ip, cs, abort=21f
  
@@ -661,7 +740,7 @@ index 805e3f8..0eb4341 100644
  
  9:		rsb	ip, ip, #4
  		cmp	ip, #2
-@@ -180,22 +491,36 @@
+@@ -180,22 +566,43 @@
  		subs	r2, r2, #28
  		blt	14f
  
@@ -707,11 +786,18 @@ index 805e3f8..0eb4341 100644
 +.endif
 +	PLD(	pld	[r3, #(- L1_CACHE_BYTES)]	)
 +
++		/*
++		 * Note that when L1_CACHE_BYTES is 64, we are
++		 * prefetching every 32 bytes. Although not optimal
++		 * there doesn't seem to be big penalty for the extra
++		 * preload instructions and it prevents greater
++		 * code size and complexity.
++		 */
 +12:	PLD(	pld	[r1, r10]		)
  13:		ldr4w	r1, r4, r5, r6, r7, abort=19f
  		mov	r3, lr, pull #\pull
  		subs	r2, r2, #32
-@@ -217,10 +542,10 @@
+@@ -217,10 +624,10 @@
  		orr	ip, ip, lr, push #\push
  		str8w	r0, r3, r4, r5, r6, r7, r8, r9, ip, , abort=19f
  		bge	12b
@@ -725,7 +811,7 @@ index 805e3f8..0eb4341 100644
  
  14:		ands	ip, r2, #28
  		beq	16f
-@@ -231,8 +556,10 @@
+@@ -231,8 +638,10 @@
  		orr	r3, r3, lr, push #\push
  		str1w	r0, r3, abort=21f
  		bgt	15b
@@ -736,7 +822,7 @@ index 805e3f8..0eb4341 100644
  
  16:		sub	r1, r1, #(\push / 8)
  		b	8b
-@@ -255,13 +582,13 @@
+@@ -255,13 +664,13 @@
   */
  
  	.macro	copy_abort_preamble
@@ -855,40 +941,39 @@ index a9b9e22..b44babc 100644
  /* Prototype: void *memcpy(void *dest, const void *src, size_t n); */
  
 diff --git a/arch/arm/lib/memset.S b/arch/arm/lib/memset.S
-index 650d592..9aa7b26 100644
+index 650d592..98bab8d 100644
 --- a/arch/arm/lib/memset.S
 +++ b/arch/arm/lib/memset.S
-@@ -13,8 +13,7 @@
+@@ -13,115 +13,129 @@
  #include <asm/assembler.h>
  
  	.text
 -	.align	5
 -	.word	0
+-
+-1:	subs	r2, r2, #4		@ 1 do we have enough
+-	blt	5f			@ 1 bytes to align with?
+-	cmp	r3, #2			@ 1
+-	strltb	r1, [r0], #1		@ 1
+-	strleb	r1, [r0], #1		@ 1
+-	strb	r1, [r0], #1		@ 1
+-	add	r2, r2, r3		@ 1 (r2 = r2 - (4 - r3))
+-/*
+- * The pointer is now aligned and the length is adjusted.  Try doing the
+- * memset again.
+- */
 +	.p2align 5
- 
- 1:	subs	r2, r2, #4		@ 1 do we have enough
- 	blt	5f			@ 1 bytes to align with?
-@@ -23,30 +22,33 @@
- 	strleb	r1, [r0], #1		@ 1
- 	strb	r1, [r0], #1		@ 1
- 	add	r2, r2, r3		@ 1 (r2 = r2 - (4 - r3))
-+	b	6f
- /*
-  * The pointer is now aligned and the length is adjusted.  Try doing the
-  * memset again.
-+ * Note: There is no need to recheck for alignment; by branching over the
-+ * alignment check we can push r0 and lr in the entry code.
-  */
  
  ENTRY(memset)
  	ands	r3, r0, #3		@ 1 unaligned?
-+	stmfd	sp!, {r0, lr}
- 	bne	1b			@ 1
+-	bne	1b			@ 1
++	mov	ip, r0			@ preserve r0 as return value
++	bne	6f			@ 1
  /*
   * we know that the pointer in r0 is aligned to a word boundary.
   */
 -	orr	r1, r1, r1, lsl #8
-+6:	orr	r1, r1, r1, lsl #8
++1:	orr	r1, r1, r1, lsl #8
 +	cmp	r2, #16
  	orr	r1, r1, r1, lsl #16
  	mov	r3, r1
@@ -899,27 +984,41 @@ index 650d592..9aa7b26 100644
 +#if ! CALGN_MEMSET(1)+0
  
  /*
-  * We need an extra register for this loop - save the return address and
-  * use the LR
+- * We need an extra register for this loop - save the return address and
+- * use the LR
++ * We need 2 extra registers for this loop - use r8 and the LR
   */
 -	str	lr, [sp, #-4]!
- 	mov	ip, r1
+-	mov	ip, r1
++	stmfd	sp!, {r8, lr}
++	mov	r8, r1
  	mov	lr, r1
  
-@@ -56,7 +58,7 @@ ENTRY(memset)
- 	stmgeia	r0!, {r1, r3, ip, lr}
- 	stmgeia	r0!, {r1, r3, ip, lr}
+ 2:	subs	r2, r2, #64
+-	stmgeia	r0!, {r1, r3, ip, lr}	@ 64 bytes at a time.
+-	stmgeia	r0!, {r1, r3, ip, lr}
+-	stmgeia	r0!, {r1, r3, ip, lr}
+-	stmgeia	r0!, {r1, r3, ip, lr}
++	stmgeia	ip!, {r1, r3, r8, lr}	@ 64 bytes at a time.
++	stmgeia	ip!, {r1, r3, r8, lr}
++	stmgeia	ip!, {r1, r3, r8, lr}
++	stmgeia	ip!, {r1, r3, r8, lr}
  	bgt	2b
 -	ldmeqfd	sp!, {pc}		@ Now <64 bytes to go.
-+	ldmeqfd	sp!, {r0, pc}		@ Now <64 bytes to go.
++	ldmeqfd	sp!, {r8, pc}		@ Now <64 bytes to go.
  /*
   * No need to correct the count; we're only testing bits from now on
   */
-@@ -65,48 +67,63 @@ ENTRY(memset)
- 	stmneia	r0!, {r1, r3, ip, lr}
+ 	tst	r2, #32
+-	stmneia	r0!, {r1, r3, ip, lr}
+-	stmneia	r0!, {r1, r3, ip, lr}
++	stmneia	ip!, {r1, r3, r8, lr}
++	stmneia	ip!, {r1, r3, r8, lr}
  	tst	r2, #16
- 	stmneia	r0!, {r1, r3, ip, lr}
+-	stmneia	r0!, {r1, r3, ip, lr}
 -	ldr	lr, [sp], #4
++	stmneia	ip!, {r1, r3, r8, lr}
++	ldmfd	sp!, {r8, lr}
  
  #else
  
@@ -938,12 +1037,14 @@ index 650d592..9aa7b26 100644
 -	mov	r5, r1
 -	mov	r6, r1
 -	mov	r7, r1
+-	mov	ip, r1
 +	cmp	r2, #64
- 	mov	ip, r1
++	stmfd	sp!, {r8, lr}
++	mov	r8, r1
  	mov	lr, r1
 +	blt	7f
 +.if MEMSET_WRITE_ALIGN_BYTES == 8
-+	tst	r0, #4
++	tst	ip, #4
 +	beq	3f
  
 -	cmp	r2, #96
@@ -958,23 +1059,24 @@ index 650d592..9aa7b26 100644
 -	stmmiia	r0!, {r4, r5}
 -	tst	ip, #(1 << 30)
 -	mov	ip, r1
+-	strne	r1, [r0], #4
 +	cmp	r2, #68
-+	str	r1, [r0], #4
++	str	r1, [ip], #4
 +        sub	r2, r2, #4
 +	blt     7f
 +.else	/* MEMSET_WRITE_ALIGN_BYTES == 32 */
-+	tst	r0, #31
++	tst	ip, #31
 +	beq	3f
-+	tst     r0, #4
- 	strne	r1, [r0], #4
++	tst     ip, #4
++	strne	r1, [ip], #4
 +        subne	r2, r2, #4
-+	tst     r0, #8
-+	stmneia r0!, {r1, r3}
++	tst     ip, #8
++	stmneia ip!, {r1, r3}
 +        subne   r2, r2, #8
-+	tst	r0, #16
-+	stmneia r0!, {r1, r3}
++	tst	ip, #16
++	stmneia ip!, {r1, r3}
 +        subne   r2, r2, #16
-+        stmneia r0!, {r1, r3}
++        stmneia ip!, {r1, r3}
 +	cmp	r2, #64
 +	blt	7f
 +.endif
@@ -984,36 +1086,57 @@ index 650d592..9aa7b26 100644
 -	stmgeia	r0!, {r1, r3-r7, ip, lr}
 -	bgt	3b
 -	ldmeqfd	sp!, {r4-r7, pc}
-+3:	stmia	r0!, {r1, r3, ip, lr}
++3:	stmia	ip!, {r1, r3, r8, lr}
 +	sub	r2, r2, #64
-+	stmia	r0!, {r1, r3, ip, lr}
++	stmia	ip!, {r1, r3, r8, lr}
 +	cmp     r2, #64
-+	stmia	r0!, {r1, r3, ip, lr}
-+	stmia	r0!, {r1, r3, ip, lr}
++	stmia	ip!, {r1, r3, r8, lr}
++	stmia	ip!, {r1, r3, r8, lr}
 +	bge	3b
 +	tst     r2, #63
-+	ldmeqfd	sp!, {r0, pc}
++	ldmeqfd	sp!, {r8, pc}
  
 -	tst	r2, #32
 -	stmneia	r0!, {r1, r3-r7, ip, lr}
 +7:	tst	r2, #32
-+	stmneia	r0!, {r1, r3, ip, lr}
-+	stmneia	r0!, {r1, r3, ip, lr}
++	stmneia	ip!, {r1, r3, r8, lr}
++	stmneia	ip!, {r1, r3, r8, lr}
  	tst	r2, #16
 -	stmneia	r0!, {r4-r7}
 -	ldmfd	sp!, {r4-r7, lr}
-+	stmneia	r0!, {r1, r3, ip, lr}
++	stmneia	ip!, {r1, r3, r8, lr}
++	ldmfd	sp!, {r8, lr}
  
  #endif
  
-@@ -122,6 +139,6 @@ ENTRY(memset)
- 	strneb	r1, [r0], #1
- 	strneb	r1, [r0], #1
+ 4:	tst	r2, #8
+-	stmneia	r0!, {r1, r3}
++	stmneia	ip!, {r1, r3}
+ 	tst	r2, #4
+-	strne	r1, [r0], #4
++	strne	r1, [ip], #4
+ /*
+  * When we get here, we've got less than 4 bytes to zero.  We
+  * may have an unaligned pointer as well.
+  */
+ 5:	tst	r2, #2
+-	strneb	r1, [r0], #1
+-	strneb	r1, [r0], #1
++	strneb	r1, [ip], #1
++	strneb	r1, [ip], #1
  	tst	r2, #1
 -	strneb	r1, [r0], #1
--	mov	pc, lr
-+	strneb	r1, [r0]
-+	ldmfd	sp!, {r0, pc}
++	strneb	r1, [ip], #1
+ 	mov	pc, lr
++
++6:	subs	r2, r2, #4		@ 1 do we have enough
++	blt	5b			@ 1 bytes to align with?
++	cmp	r3, #2			@ 1
++	strltb	r1, [ip], #1		@ 1
++	strleb	r1, [ip], #1		@ 1
++	strb	r1, [ip], #1		@ 1
++	add	r2, r2, r3		@ 1 (r2 = r2 - (4 - r3))
++	b	1b
  ENDPROC(memset)
 diff --git a/arch/arm/lib/memzero.S b/arch/arm/lib/memzero.S
 index 3fbdef5..5bcb3e7 100644
