@@ -34,14 +34,15 @@ platforms sharing the same ARM architecture.
 As a side-effect, the ARM memset function now properly returns the
 original destination in r0, which may help fix issues relating to
 compiling ARM kernels with gcc versions greater than 4.7. However,
-newer kernels (such as stable 3.9.x) already contain a fix for this;
-the patch will not apply cleanly in this case. A version of this
-patch that can be applied against the newer kernels will be made
-available soon.
+newer kernels (such as stable 3.9.x and kernels backported wit the
+fix) already contain a fix for this; the patch will not apply cleanly
+in this case. A version that can be applied cleanly against these
+kernels is available as kernel-recent-armv6v7-mem-funcs.patch.
 
 Tested platforms:
 
-- Raspberry Pi (armv6) with 3.6.y kernel.
+- Raspberry Pi (armv6) with 3.6.y kernel
+- Raspberry Pi with 3.9.y kernel, gcc 4.8
 - Allwinner A10 linux-sunxi platform with 3.4.43 kernel, gcc 4.7 and 4.8
 
 sunxifb/ holds mostly obsolete patches for the xf86-video-sunxifb driver
