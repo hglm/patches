@@ -1,4 +1,4 @@
-From 22888cdbdd931615e975b48cfb019b79b2cd903a Mon Sep 17 00:00:00 2001
+From c838403ba913f8cf6c09b7463da67b6e67d82395 Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Mon, 24 Jun 2013 14:41:10 +0200
 Subject: [PATCH] Optimize kernel memcpy/memset functions for ARM v6/v7
@@ -42,14 +42,14 @@ Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
 ---
  arch/arm/include/asm/assembler.h |   24 +-
  arch/arm/include/asm/cache.h     |   12 +
- arch/arm/lib/copy_from_user.S    |   35 ++-
- arch/arm/lib/copy_page.S         |   64 +++--
- arch/arm/lib/copy_template.S     |  538 ++++++++++++++++++++++++++++++++++----
- arch/arm/lib/copy_to_user.S      |   35 ++-
- arch/arm/lib/memcpy.S            |   18 +-
- arch/arm/lib/memset.S            |  142 +++++-----
- arch/arm/lib/memzero.S           |   97 ++++---
- 9 files changed, 778 insertions(+), 187 deletions(-)
+ arch/arm/lib/copy_from_user.S    |   43 ++-
+ arch/arm/lib/copy_page.S         |   64 ++--
+ arch/arm/lib/copy_template.S     |  608 ++++++++++++++++++++++++++++++++++----
+ arch/arm/lib/copy_to_user.S      |   43 ++-
+ arch/arm/lib/memcpy.S            |   26 +-
+ arch/arm/lib/memset.S            |  142 +++++----
+ arch/arm/lib/memzero.S           |   97 +++---
+ 9 files changed, 872 insertions(+), 187 deletions(-)
 
 diff --git a/arch/arm/include/asm/assembler.h b/arch/arm/include/asm/assembler.h
 index 5c8b3bf4..5f3336f 100644
@@ -128,7 +128,7 @@ index 75fe66b..01e31e0 100644
   * sure that all such allocations are cache aligned. Otherwise,
   * unrelated code may cause parts of the buffer to be read into the
 diff --git a/arch/arm/lib/copy_from_user.S b/arch/arm/lib/copy_from_user.S
-index 66a477a..9bdd4fa 100644
+index 66a477a..7dddce1 100644
 --- a/arch/arm/lib/copy_from_user.S
 +++ b/arch/arm/lib/copy_from_user.S
 @@ -12,6 +12,7 @@
@@ -139,7 +139,7 @@ index 66a477a..9bdd4fa 100644
  
  /*
   * Prototype:
-@@ -39,6 +40,7 @@
+@@ -39,11 +40,16 @@
  #define LDR1W_SHIFT	1
  #endif
  #define STR1W_SHIFT	0
@@ -147,10 +147,23 @@ index 66a477a..9bdd4fa 100644
  
  	.macro ldr1w ptr reg abort
  	ldrusr	\reg, \ptr, 4, abort=\abort
-@@ -64,6 +66,10 @@
+ 	.endm
+ 
++	.macro ldr1wcond ptr reg cond abort
++	ldrusr	\reg, \ptr, 4, \cond, abort=\abort
++	.endm
++
+ 	.macro ldr4w ptr reg1 reg2 reg3 reg4 abort
+ 	ldr1w \ptr, \reg1, \abort
+ 	ldr1w \ptr, \reg2, \abort
+@@ -64,6 +70,14 @@
  	W(str) \reg, [\ptr], #4
  	.endm
  
++	.macro str1wcond ptr reg cond abort
++	W(str\cond) \reg, [\ptr], #4
++	.endm
++
 +	.macro str4w ptr reg1 reg2 reg3 reg4 abort
 +	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4}
 +	.endm
@@ -158,7 +171,7 @@ index 66a477a..9bdd4fa 100644
  	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
  	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4, \reg5, \reg6, \reg7, \reg8}
  	.endm
-@@ -72,17 +78,21 @@
+@@ -72,17 +86,21 @@
  	str\cond\()b \reg, [\ptr], #1
  	.endm
  
@@ -185,7 +198,7 @@ index 66a477a..9bdd4fa 100644
  
  ENTRY(__copy_from_user)
  
-@@ -93,12 +103,21 @@ ENDPROC(__copy_from_user)
+@@ -93,12 +111,21 @@ ENDPROC(__copy_from_user)
  	.pushsection .fixup,"ax"
  	.align 0
  	copy_abort_preamble
@@ -297,13 +310,36 @@ index 6ee2f67..74bfac1 100644
 +		ldmfd	sp!, {r4-r8, pc}		@	3
  ENDPROC(copy_page)
 diff --git a/arch/arm/lib/copy_template.S b/arch/arm/lib/copy_template.S
-index 805e3f8..00211ce 100644
+index 805e3f8..72786cf 100644
 --- a/arch/arm/lib/copy_template.S
 +++ b/arch/arm/lib/copy_template.S
-@@ -41,22 +41,23 @@
+@@ -10,6 +10,9 @@
+  *  This program is free software; you can redistribute it and/or modify
+  *  it under the terms of the GNU General Public License version 2 as
+  *  published by the Free Software Foundation.
++ *
++ *  Optimization for modern ARM platforms
++ *  Copyright 2013 Harm Hanemaaijer
+  */
+ 
+ /*
+@@ -27,6 +30,11 @@
+  *	This loads one word from 'ptr', stores it in 'reg' and increments
+  *	'ptr' to the next word. The 'abort' argument is used for fixup tables.
+  *
++ * ldr1wcond ptr reg cond abort
++ *
++ *	Similar to ldr1w, but also applies the condition code if provided,
++ *	otherwise the "al" condition is assumed by default.
++ *
+  * ldr4w ptr reg1 reg2 reg3 reg4 abort
+  * ldr8w ptr, reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
+  *
+@@ -41,22 +49,24 @@
   *	"al" condition is assumed by default.
   *
   * str1w ptr reg abort
++ * str1wcond ptr reg abort
 + * str4w ptr reg1 reg2 reg3 reg4 abort
   * str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
   * str1b ptr reg cond abort
@@ -331,7 +367,7 @@ index 805e3f8..00211ce 100644
   *
   * LDR1W_SHIFT
   * STR1W_SHIFT
-@@ -64,47 +65,460 @@
+@@ -64,47 +74,521 @@
   *	Correction to be applied to the "ip" register when branching into
   *	the ldr1w or str1w instructions (some of these macros may expand to
   *	than one 32bit instruction in Thumb-2)
@@ -394,7 +430,7 @@ index 805e3f8..00211ce 100644
 +#define FAST_PATH_SIZE_THRESHOLD 256
 +#endif
 +#ifdef COPY_FUNCTION_FROM_USER
-+#define SMALL_SIZE_THRESHOLD 8
++#define SMALL_SIZE_THRESHOLD 7
 +/*
 + * For copy_from_user, the fast path is unoptimal for sizes greater or
 + * equal to about 96 bytes.
@@ -403,7 +439,7 @@ index 805e3f8..00211ce 100644
 +#define DISABLE_WRITE_ALIGNMENT
 +#endif
 +#ifdef COPY_FUNCTION_TO_USER
-+#define SMALL_SIZE_THRESHOLD 8
++#define SMALL_SIZE_THRESHOLD 7
 +/*
 + * When copy_to_user_memcpy is enabled in the kernel configuration
 + * (CONFIG_UACCESS_WITH_MEMCPY), the assembler copy_to_user function
@@ -432,9 +468,9 @@ index 805e3f8..00211ce 100644
 +                 */
 +		cmp	r2, #SMALL_SIZE_THRESHOLD
 +		/* Calculate the aligned base for preloads. */
-+		bic	ip, r1, #(L1_CACHE_BYTES - 1)
++	PLD(	bic	ip, r1, #(L1_CACHE_BYTES - 1)	)
 +		enter_no_regs
-+		pld	[ip]
++	PLD(	pld	[ip]				)
 +		orr	r3, r0, r1
 +		ble	36f
 +		cmp	r2, #FAST_PATH_SIZE_THRESHOLD
@@ -450,8 +486,18 @@ index 805e3f8..00211ce 100644
 +		/* In the case of regular memcpy, SMALL_SIZE_THRESHOLD >= 15
 +		 * which means that the number of bytes >= 16 when we get here.
 +		 */
++/* The optimal value for EARLY_PREFETCHES was determined emperically. */
++#if L1_CACHE_BYTES == 32
++#define EARLY_PREFETCHES (PREFETCH_DISTANCE + 1)
++#else	/* L1_CACHE_BYTES == 64 */
++#if PREFETCH_DISTANCE <= 2
++#define EARLY_PREFETCHES 2
++#else
++#define EARLY_PREFETCHES (PREFETCH_DISTANCE - 1)
++#endif
++#endif
 +.macro check_preload bytes_to_go
-+.if \bytes_to_go >= (PREFETCH_DISTANCE * L1_CACHE_BYTES) && \
++.if \bytes_to_go >= (EARLY_PREFETCHES * L1_CACHE_BYTES) && \
 +(\bytes_to_go % L1_CACHE_BYTES) == 0
 +	PLD(	pld     [r1, r5]	)
 +	NO_PLD(	nop )
@@ -466,14 +512,46 @@ index 805e3f8..00211ce 100644
 +                 * Use a heuristic to determine whether the preload
 +		 * at aligned_base + 2 * L1_CACHE_BYTES will be useful.
 +		 */
++#if EARLY_PREFETCHES >= 3
 +	PLD(	cmp	r2, #(2 * L1_CACHE_BYTES - L1_CACHE_BYTES / 2)	)
-+	PLD(	add	r5, ip, #(3 * L1_CACHE_BYTES) )
-+		sub	r2, r2, r3
-+	PLD(	blt	40f	)
++#endif
++	PLD(	add	r5, ip, #(EARLY_PREFETCHES * L1_CACHE_BYTES) )
++#if EARLY_PREFETCHES >= 3
++	PLD(	blt	40f			)
++#endif
++#if EARLY_PREFETCHES == 3
 +	PLD(	pld	[ip, #(2 * L1_CACHE_BYTES)] )
-+40:		rsb	r3, r3, #256
-+	PLD(	sub	r5, r5, r1		)
-+		add	pc, pc, r3
++#endif
++#if EARLY_PREFETCHES == 4
++	PLD(	cmp	r2, #(3 * L1_CACHE_BYTES - L1_CACHE_BYTES / 2)	)
++	PLD(	pld	[ip, #(2 * L1_CACHE_BYTES)] )
++	PLD(	blt	40f			)
++	PLD(	pld	[ip, #(3 * L1_CACHE_BYTES)] )
++#endif
++#if EARLY_PREFETCHES == 5
++	PLD(	cmp	r2, #(3 * L1_CACHE_BYTES - L1_CACHE_BYTES / 2)	)
++	PLD(	pld	[ip, #(2 * L1_CACHE_BYTES)] )
++	PLD(	blt	40f			)
++	PLD(	cmp	r2, #(4 * L1_CACHE_BYTES - L1_CACHE_BYTES / 2)	)
++	PLD(	pld	[ip, #(3 * L1_CACHE_BYTES)] )
++	PLD(	blt	40f			)
++	PLD(	pld	[ip, #(4 * L1_CACHE_BYTES)] )
++#endif
++40:		/*
++		 * Set r5 so that the next preload will occur
++		 * exactly at aligned_base + EARLY_PREFETCHES * 
++		 * L1_CACHE_BYTES. For example, if L1_CACHE_BYTES is 64
++		 * and the number of bytes is 240, the next preload
++		 * will occur after processing 48 bytes, which is derived
++		 * from the formula r3 & (L1_CACHE_BYTES - 1),
++		 * where r3 is equal to number_of_bytes & (~15).
++		 */
++		rsb	r4, r3, #256
++	PLD(	sub	r5, r5, r1			)
++	PLD(	and	ip, r3, #(L1_CACHE_BYTES - 1)	)
++		sub	r2, r2, r3
++	PLD(	sub	r5, r5, ip			)
++		add	pc, pc, r4
 +		nop
 +		/* 256 bytes to go. */
 +		check_preload 256
@@ -593,9 +671,8 @@ index 805e3f8..00211ce 100644
 +		str1w	r0, ip, abort=22f
 +		bge	32b
 +		tst	r2, #4
-+		beq	34f
-+		ldr1w	r1, r3, abort=22f
-+		str1w	r0, r3, abort=22f
++		ldr1wcond r1, r3, ne, abort=22f
++		str1wcond r0, r3, ne, abort=22f
 +#endif
 +34:		tst	r2, #3
 +		bne	38f
@@ -607,6 +684,25 @@ index 805e3f8..00211ce 100644
 +		 * or word aligned source and destination; otherwise, branch
 +		 * to the general case.
 +                 */
++#if SMALL_SIZE_THRESHOLD <= 7
++		tst	r3, #3		/* Sets the carry flag. */
++		cmpne	r2, #3
++		bhi	37f		/* Branch if cs and ne. */
++		/*
++		 * Word aligned source and destination, >= 4 bytes and <= 7,
++		 * or unaligned, < 4 bytes.
++		 */
++		tst	r2, #4
++		ldr1wcond r1, r3, ne, abort=22f
++		str1wcond r0, r3, ne, abort=22f
++		tst	r2, #3
++#ifdef COPY_FUNCTION_MEMCPY
++		ldmeqfd	sp!, {r0}
++		moveq	pc, lr
++#else
++		beq	39f
++#endif
++#else
 +		cmp	r2, #4
 +		blt	38f
 +		tst	r3, #3
@@ -619,6 +715,7 @@ index 805e3f8..00211ce 100644
 +		bgt	44b
 +		adds	r2, r2, #3
 +		beq	39f
++#endif
 +38:		movs	r2, r2, lsl #31
 +		ldr1b	r1, r3, ne, abort=22f
 +		ldr1b	r1, ip, cs, abort=22f
@@ -656,7 +753,7 @@ index 805e3f8..00211ce 100644
 +		 */
 +37:		tst	r3, #3
 +		stmdb	sp!, {r4, lr}
-+		mov	r3, ip
++	PLD(	mov	r3, ip			)
 +	PLD(	pld	[ip, #L1_CACHE_BYTES]	)
 +		bne	33b	/* Unaligned. */
 +
@@ -673,7 +770,7 @@ index 805e3f8..00211ce 100644
 +37:		stmdb	sp!, {r4, lr}
 +
 +33:		subs	r2, r2, #4
-+		mov	r3, ip
++	PLD(	mov	r3, ip			)
  		blt	8f
  		ands	ip, r0, #3
 -	PLD(	pld	[r1, #0]		)
@@ -685,7 +782,7 @@ index 805e3f8..00211ce 100644
  1:		subs	r2, r2, #(28)
 -		stmfd	sp!, {r5 - r8}
 +		stmfd	sp!, {r5 - r9}
-+		mov	r8, r3
++	PLD(	mov	r8, r3			)
  		blt	5f
 +#endif
  
@@ -770,15 +867,15 @@ index 805e3f8..00211ce 100644
 +	PLD(	cmn	r2, #(PREFETCH_DISTANCE * 32)	)
  	PLD(	bge	4b			)
 +.else /* L1_CACHE_BYTES == 64 */
-+3:		pld	[r1, r9]
++3:	PLD(	pld	[r1, r9]		)
 +4:		ldr8w	r1, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
 +		subs	r2, r2, #64
 +		str8w	r0, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
 +		ldr8w	r1, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
 +		str8w	r0, r3, r4, r5, r6, r7, r8, ip, lr, abort=20f
 +		bge	3b
-+		cmn	r2, #(PREFETCH_DISTANCE * 64)
-+		bge	4b
++	PLD(	cmn	r2, #(PREFETCH_DISTANCE * 64)	)
++	PLD(	bge	4b				)
  
 -5:		ands	ip, r2, #28
 +30:		tst     r2, #32
@@ -809,7 +906,7 @@ index 805e3f8..00211ce 100644
  		rsb	ip, ip, #32
  #if LDR1W_SHIFT > 0
  		lsl	ip, ip, #LDR1W_SHIFT
-@@ -141,9 +555,12 @@
+@@ -141,9 +625,12 @@
  		str1w	r0, r8, abort=20f
  		str1w	r0, lr, abort=20f
  
@@ -824,7 +921,7 @@ index 805e3f8..00211ce 100644
  
  8:		movs	r2, r2, lsl #31
  		ldr1b	r1, r3, ne, abort=21f
-@@ -153,7 +570,8 @@
+@@ -153,7 +640,8 @@
  		str1b	r0, r4, cs, abort=21f
  		str1b	r0, ip, cs, abort=21f
  
@@ -834,7 +931,7 @@ index 805e3f8..00211ce 100644
  
  9:		rsb	ip, ip, #4
  		cmp	ip, #2
-@@ -180,22 +598,43 @@
+@@ -180,22 +668,43 @@
  		subs	r2, r2, #28
  		blt	14f
  
@@ -891,7 +988,7 @@ index 805e3f8..00211ce 100644
  13:		ldr4w	r1, r4, r5, r6, r7, abort=19f
  		mov	r3, lr, pull #\pull
  		subs	r2, r2, #32
-@@ -217,10 +656,10 @@
+@@ -217,10 +726,10 @@
  		orr	ip, ip, lr, push #\push
  		str8w	r0, r3, r4, r5, r6, r7, r8, r9, ip, , abort=19f
  		bge	12b
@@ -905,7 +1002,7 @@ index 805e3f8..00211ce 100644
  
  14:		ands	ip, r2, #28
  		beq	16f
-@@ -231,8 +670,10 @@
+@@ -231,8 +740,10 @@
  		orr	r3, r3, lr, push #\push
  		str1w	r0, r3, abort=21f
  		bgt	15b
@@ -916,7 +1013,7 @@ index 805e3f8..00211ce 100644
  
  16:		sub	r1, r1, #(\push / 8)
  		b	8b
-@@ -255,13 +696,10 @@
+@@ -255,13 +766,10 @@
   */
  
  	.macro	copy_abort_preamble
@@ -935,7 +1032,7 @@ index 805e3f8..00211ce 100644
  	.endm
  
 diff --git a/arch/arm/lib/copy_to_user.S b/arch/arm/lib/copy_to_user.S
-index d066df6..d5db490 100644
+index d066df6..6b2576e 100644
 --- a/arch/arm/lib/copy_to_user.S
 +++ b/arch/arm/lib/copy_to_user.S
 @@ -12,6 +12,7 @@
@@ -946,7 +1043,7 @@ index d066df6..d5db490 100644
  
  /*
   * Prototype:
-@@ -39,6 +40,7 @@
+@@ -39,11 +40,16 @@
  #else
  #define STR1W_SHIFT	1
  #endif
@@ -954,10 +1051,23 @@ index d066df6..d5db490 100644
  
  	.macro ldr1w ptr reg abort
  	W(ldr) \reg, [\ptr], #4
-@@ -60,6 +62,13 @@
+ 	.endm
+ 
++	.macro ldr1wcond ptr reg cond abort
++	W(ldr\cond) \reg, [\ptr], #4
++	.endm
++
+ 	.macro ldr4w ptr reg1 reg2 reg3 reg4 abort
+ 	ldmia \ptr!, {\reg1, \reg2, \reg3, \reg4}
+ 	.endm
+@@ -60,6 +66,17 @@
  	strusr	\reg, \ptr, 4, abort=\abort
  	.endm
  
++	.macro str1wcond ptr reg cond abort
++	strusr	\reg, \ptr, 4, \cond, abort=\abort
++	.endm
++
 +	.macro str4w ptr reg1 reg2 reg3 reg4 abort
 +	str1w \ptr, \reg1, \abort
 +	str1w \ptr, \reg2, \abort
@@ -968,7 +1078,7 @@ index d066df6..d5db490 100644
  	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
  	str1w \ptr, \reg1, \abort
  	str1w \ptr, \reg2, \abort
-@@ -75,17 +84,24 @@
+@@ -75,17 +92,24 @@
  	strusr	\reg, \ptr, 1, \cond, abort=\abort
  	.endm
  
@@ -998,7 +1108,7 @@ index d066df6..d5db490 100644
  
  ENTRY(__copy_to_user_std)
  WEAK(__copy_to_user)
-@@ -98,9 +114,14 @@ ENDPROC(__copy_to_user_std)
+@@ -98,9 +122,14 @@ ENDPROC(__copy_to_user_std)
  	.pushsection .fixup,"ax"
  	.align 0
  	copy_abort_preamble
@@ -1016,10 +1126,10 @@ index d066df6..d5db490 100644
  	.popsection
  
 diff --git a/arch/arm/lib/memcpy.S b/arch/arm/lib/memcpy.S
-index a9b9e22..07cdf5a 100644
+index a9b9e22..b2868c2 100644
 --- a/arch/arm/lib/memcpy.S
 +++ b/arch/arm/lib/memcpy.S
-@@ -12,9 +12,11 @@
+@@ -12,14 +12,20 @@
  
  #include <linux/linkage.h>
  #include <asm/assembler.h>
@@ -1031,10 +1141,23 @@ index a9b9e22..07cdf5a 100644
  
  	.macro ldr1w ptr reg abort
  	W(ldr) \reg, [\ptr], #4
-@@ -36,6 +38,10 @@
+ 	.endm
+ 
++	.macro ldr1wcond ptr reg cond abort
++	W(ldr\cond) \reg, [\ptr], #4
++	.endm
++
+ 	.macro ldr4w ptr reg1 reg2 reg3 reg4 abort
+ 	ldmia \ptr!, {\reg1, \reg2, \reg3, \reg4}
+ 	.endm
+@@ -36,6 +42,14 @@
  	W(str) \reg, [\ptr], #4
  	.endm
  
++	.macro str1wcond ptr reg cond abort
++	W(str\cond) \reg, [\ptr], #4
++	.endm
++
 +	.macro str4w ptr reg1 reg2 reg3 reg4 abort
 +	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4}
 +	.endm
@@ -1042,7 +1165,7 @@ index a9b9e22..07cdf5a 100644
  	.macro str8w ptr reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 abort
  	stmia \ptr!, {\reg1, \reg2, \reg3, \reg4, \reg5, \reg6, \reg7, \reg8}
  	.endm
-@@ -44,15 +50,19 @@
+@@ -44,15 +58,19 @@
  	str\cond\()b \reg, [\ptr], #1
  	.endm
  
