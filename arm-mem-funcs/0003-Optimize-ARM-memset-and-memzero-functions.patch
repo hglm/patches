@@ -1,4 +1,4 @@
-From 4c6a917cd6e56ceacba61b3476daa9794aa7f60a Mon Sep 17 00:00:00 2001
+From df46d22d8d07796cf94285520598d0a07e83111b Mon Sep 17 00:00:00 2001
 From: Harm Hanemaaijer <fgenfb@yahoo.com>
 Date: Fri, 12 Jul 2013 16:23:34 +0200
 Subject: [PATCH 3/3] Optimize ARM memset and memzero functions
@@ -32,15 +32,15 @@ ARM assembler syntax.
 Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
 ---
  arch/arm/include/asm/assembler.h |   27 +++++
- arch/arm/lib/memset.S            |  198 ++++++++++++++++++++----------------
- arch/arm/lib/memzero.S           |  207 ++++++++++++++++++++------------------
- 3 files changed, 248 insertions(+), 184 deletions(-)
+ arch/arm/lib/memset.S            |  199 ++++++++++++++++++++----------------
+ arch/arm/lib/memzero.S           |  208 ++++++++++++++++++++------------------
+ 3 files changed, 250 insertions(+), 184 deletions(-)
 
 diff --git a/arch/arm/include/asm/assembler.h b/arch/arm/include/asm/assembler.h
-index 121c3d3..d2854d4 100644
+index 11e1e10..bb821a6 100644
 --- a/arch/arm/include/asm/assembler.h
 +++ b/arch/arm/include/asm/assembler.h
-@@ -71,12 +71,39 @@
+@@ -72,12 +72,39 @@
   * is used).
   *
   * On Feroceon there is much to gain however, regardless of cache mode.
@@ -81,10 +81,10 @@ index 121c3d3..d2854d4 100644
  /*
   * Enable and disable interrupts
 diff --git a/arch/arm/lib/memset.S b/arch/arm/lib/memset.S
-index 94b0650..bbca0b7 100644
+index 94b0650..359f3f0 100644
 --- a/arch/arm/lib/memset.S
 +++ b/arch/arm/lib/memset.S
-@@ -8,116 +8,138 @@
+@@ -8,116 +8,139 @@
   * published by the Free Software Foundation.
   *
   *  ASM optimised string functions
@@ -100,6 +100,7 @@ index 94b0650..bbca0b7 100644
 -	.align	5
 +	.syntax unified
 +ARM(	.p2align 5	)
++THUMB(	.p2align 2	)
  
  ENTRY(memset)
 -	ands	r3, r0, #3		@ 1 unaligned?
@@ -312,10 +313,10 @@ index 94b0650..bbca0b7 100644
 +	mov	pc, lr
  ENDPROC(memset)
 diff --git a/arch/arm/lib/memzero.S b/arch/arm/lib/memzero.S
-index 3fbdef5..b3e20af 100644
+index 3fbdef5..4e11602 100644
 --- a/arch/arm/lib/memzero.S
 +++ b/arch/arm/lib/memzero.S
-@@ -6,120 +6,135 @@
+@@ -6,120 +6,136 @@
   * This program is free software; you can redistribute it and/or modify
   * it under the terms of the GNU General Public License version 2 as
   * published by the Free Software Foundation.
@@ -347,6 +348,7 @@ index 3fbdef5..b3e20af 100644
 - */
 +	.syntax unified
 +ARM(	.p2align 5	)
++THUMB(	.p2align 2	)
  
  ENTRY(__memzero)
 -	mov	r2, #0			@ 1
