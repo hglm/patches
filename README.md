@@ -21,6 +21,9 @@ cfbfillrect is called repeatedly for small areas, and the framebuffer
 depth is 16bpp on 32-bit systems or any depth on 64-bit systems, this
 patch should provide improved performance.
 
+kernel-cfbfillrect-experimental-v2.patch add untested support for 32-bit
+big-endian systems to the previous patch
+
 The arm-mem-funcs directory contains a work-in-progress experimental
 patch set for the Linux kernel to bring up to date the ARM-optimized
 memory copy and fill functions, which are for a large part still
