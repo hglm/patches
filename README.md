@@ -13,16 +13,24 @@ Tested platforms:
 - Raspberry Pi with 3.6.y kernel.
 - Allwinner A10 linux-sunxi platform with 3.4.x kernel.
 
+This patch has been included in official Raspberry Pi kernels since the
+middle of 2013.
+
 kernel-cfbfillrect-experimental.patch is an experimental patch for the
 linux kernel to eliminate framebuffer memory reads during simple rectangle
 fill operations at 16bpp and 32bpp. Framebuffer reads for simple fills
-are totally unnecessary but can cause big a slowdown when triggered. When
-cfbfillrect is called repeatedly for small areas, and the framebuffer
-depth is 16bpp on 32-bit systems or any depth on 64-bit systems, this
-patch should provide improved performance.
+are totally unnecessary but can cause big a slowdown when triggered,
+potentially stalling the CPU and system for some time and impacting
+real-time processing. This patch will eliminate unnecessary framebuffer
+reads when the pixel depth is 16bpp on 32-bit systems or either 16bpp or
+32bpp on 64-bit systems. On a 32-bit system with 32bpp pixel depth,
+framebuffer reads generally won't happen for regular fills so the patch
+will have little effect. This version of the patch is for little-endian
+systems only.
 
-kernel-cfbfillrect-experimental-v2.patch add untested support for 32-bit
-big-endian systems to the previous patch
+kernel-cfbfillrect-experimental-v2.patch adds support for 32-bit
+big-endian systems to the previous patch. It has been reported to work
+correctly on one system but otherwise lack extensive testing.
 
 The arm-mem-funcs directory contains a work-in-progress experimental
 patch set for the Linux kernel to bring up to date the ARM-optimized
@@ -54,6 +62,8 @@ Tested platforms:
 
 - Allwinner A10 linux-sunxi platform with 3.4.43 kernel, gcc 4.8
 
+Obsolete patches:
+
 sunxifb/ holds mostly obsolete patches for the xf86-video-sunxifb driver
 corresponding to the various-optimizations branch.
 
@@ -63,5 +73,6 @@ xf86-video-sunxi repository using benchmarks such as x11perf.
 
 benchimagemark.tar.gz is a slightly modified version of a program I found
 on the web to measure off-screen to screen copy throughput using various
-methods (xPutImage, xShmPutImage, shared memory pixmaps).
+methods (xPutImage, xShmPutImage, shared memory pixmaps). More complete
+functionality of this kind of provided in my benchx repository.
 
