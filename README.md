@@ -1,6 +1,6 @@
-Miscellaneous patches and files
+###Miscellaneous patches and files
 
-#Linux kernel cfb optimizations
+##Linux kernel cfb optimizations
 
 kernel-cfbimageblt.patch is a patch for the Linux kernel to significantly
 speed up framebuffer console text drawing. It has been tested on a 3.4.x
@@ -34,7 +34,7 @@ kernel-cfbfillrect-experimental-v2.patch adds support for 32-bit
 big-endian systems to the previous patch. It has been reported to work
 correctly on one system but otherwise lack extensive testing.
 
-#Linux kernel ARM memory functions
+##Linux kernel ARM memory functions
 
 The arm-mem-funcs directory contains a work-in-progress experimental
 patch set for the Linux kernel to bring up to date the ARM-optimized
@@ -64,7 +64,7 @@ recent ARM memset fixes (March 2013) applied. The patch set no longer
 applies cleanly with up-to-date upstream kernels as of February 2015,
 and would require some work to adapt.
 
-#Improvements for the Raspberry Pi/Raspberry Pi 2 fb layer
+##Improvements for the Raspberry Pi/Raspberry Pi 2 fb layer
 
 The patch set in the raspberrypi/extend-fb directory contains two
 patches. The first one disables the use of DMA copy for console
