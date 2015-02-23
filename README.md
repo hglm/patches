@@ -1,5 +1,7 @@
 Miscellaneous patches and files
 
+1. Linux kernel cfb optimizations
+
 kernel-cfbimageblt.patch is a patch for the Linux kernel to significantly
 speed up framebuffer console text drawing. It has been tested on a 3.4.x
 kernel used on the ARM-based Allwinner platform and on a 3.6.x kernel on
@@ -32,6 +34,8 @@ kernel-cfbfillrect-experimental-v2.patch adds support for 32-bit
 big-endian systems to the previous patch. It has been reported to work
 correctly on one system but otherwise lack extensive testing.
 
+2. Linux kernel ARM memory functions
+
 The arm-mem-funcs directory contains a work-in-progress experimental
 patch set for the Linux kernel to bring up to date the ARM-optimized
 memory copy and fill functions, which are for a large part still
@@ -56,23 +60,21 @@ userspace versions for benchmarking and validation of the optimized
 functions are does include preliminary implementations of memcpy.
 
 To apply cleanly the patch set requires an up-to-date kernel with the
-recent ARM memset fixes (March 2013) applied.
+recent ARM memset fixes (March 2013) applied. The patch set no longer
+applies cleanly with up-to-date upstream kernels as of February 2015,
+and would require some work to adapt.
 
-Tested platforms:
+3. Improvements for the Raspberry Pi/Raspberry Pi 2 fb layer
 
-- Allwinner A10 linux-sunxi platform with 3.4.43 kernel, gcc 4.8
+The patch set in the raspberrypi/extend-fb directory contains two
+patches. The first one disables the use of DMA copy for console
+text scrolling on the Raspberry Pi 2 because the new model no longer
+benefits, with optimized screen redraw (as implemented using the
+optimized cfb functions mentioned above) providing better performance.
 
-Obsolete patches:
-
-sunxifb/ holds mostly obsolete patches for the xf86-video-sunxifb driver
-corresponding to the various-optimizations branch.
-
-sunxifb/sunxifb-performance-tests gives some detail on performance
-improvements implemented by the various-optimizations branch of the forked
-xf86-video-sunxi repository using benchmarks such as x11perf.
-
-benchimagemark.tar.gz is a slightly modified version of a program I found
-on the web to measure off-screen to screen copy throughput using various
-methods (xPutImage, xShmPutImage, shared memory pixmaps). More complete
-functionality of this kind of provided in my benchx repository.
+The second patch extends the fb layer used by the Raspberry Pi and
+Raspberry Pi 2 to provide three screen buffers instead of only one.
+This facilitates smooth animation by making double or triple-buffering
+possible in console applications. The DMA-accelerated copyarea is also
+extended to all of the extended framebuffer.
 

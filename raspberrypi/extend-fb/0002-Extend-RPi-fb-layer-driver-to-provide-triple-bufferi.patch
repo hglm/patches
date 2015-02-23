@@ -1,0 +1,82 @@
+From fd32f8762b6b4481912f21ba309ade9e7dc48551 Mon Sep 17 00:00:00 2001
+From: Harm Hanemaaijer <fgenfb@yahoo.com>
+Date: Mon, 23 Feb 2015 20:11:13 +0100
+Subject: [PATCH 2/2] Extend RPi fb layer driver to provide triple-buffering
+
+This commit extends the fb layer driver used by the Raspberry Pi in
+drivers/video/fbdev/bcm2708_fb.c to provide three screen pages,
+allowing double or triple-buffering and facilitating smooth and
+tear-free animation for console applications that do not use
+EGL/GLES2. The size of the framebuffer memory region visible to
+console applications is now three times as large as it used to be.
+
+The DMA-accelerated CopyArea function that was already provided by the
+fb layer is also extended to allow access to all three screen pages.
+In order to do so, the function fb_copyarea_user in the core fb layer
+is modified to allow access to the framebuffer beyond the first screen.
+
+Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
+---
+ drivers/video/fbdev/bcm2708_fb.c | 14 +++++++-------
+ drivers/video/fbdev/core/fbmem.c |  8 ++++----
+ 2 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/video/fbdev/bcm2708_fb.c b/drivers/video/fbdev/bcm2708_fb.c
+index 81dfb32..491fab7 100644
+--- a/drivers/video/fbdev/bcm2708_fb.c
++++ b/drivers/video/fbdev/bcm2708_fb.c
+@@ -477,17 +477,17 @@ static void bcm2708_fb_copyarea(struct fb_info *info,
+ 	/* Fallback to cfb_copyarea() if we don't like something */
+ 	if (in_atomic() ||
+ 	    bytes_per_pixel > 4 ||
+-	    info->var.xres * info->var.yres > 1920 * 1200 ||
++	    info->var.xres > 1920 ||
+ 	    region->width <= 0 || region->width > info->var.xres ||
+-	    region->height <= 0 || region->height > info->var.yres ||
++	    region->height <= 0 || region->height > info->var.yres_virtual ||
+ 	    region->sx < 0 || region->sx >= info->var.xres ||
+-	    region->sy < 0 || region->sy >= info->var.yres ||
++	    region->sy < 0 || region->sy >= info->var.yres_virtual ||
+ 	    region->dx < 0 || region->dx >= info->var.xres ||
+-	    region->dy < 0 || region->dy >= info->var.yres ||
++	    region->dy < 0 || region->dy >= info->var.yres_virtual ||
+ 	    region->sx + region->width > info->var.xres ||
+ 	    region->dx + region->width > info->var.xres ||
+-	    region->sy + region->height > info->var.yres ||
+-	    region->dy + region->height > info->var.yres) {
++	    region->sy + region->height > info->var.yres_virtual ||
++	    region->dy + region->height > info->var.yres_virtual) {
+ 		cfb_copyarea(info, region);
+ 		return;
+ 	}
+@@ -660,7 +660,7 @@ static int bcm2708_fb_register(struct bcm2708_fb *fb)
+ 	fb->fb.var.xres = fbwidth;
+ 	fb->fb.var.yres = fbheight;
+ 	fb->fb.var.xres_virtual = fbwidth;
+-	fb->fb.var.yres_virtual = fbheight;
++	fb->fb.var.yres_virtual = fbheight * 3;
+ 	fb->fb.var.bits_per_pixel = fbdepth;
+ 	fb->fb.var.vmode = FB_VMODE_NONINTERLACED;
+ 	fb->fb.var.activate = FB_ACTIVATE_NOW;
+diff --git a/drivers/video/fbdev/core/fbmem.c b/drivers/video/fbdev/core/fbmem.c
+index 771992a..aa95f4e 100644
+--- a/drivers/video/fbdev/core/fbmem.c
++++ b/drivers/video/fbdev/core/fbmem.c
+@@ -1090,10 +1090,10 @@ static int fb_copyarea_user(struct fb_info *info,
+ 	int ret = 0;
+ 	if (!lock_fb_info(info))
+ 		return -ENODEV;
+-	if (copy->dx + copy->width > info->var.xres ||
+-	    copy->sx + copy->width > info->var.xres ||
+-	    copy->dy + copy->height > info->var.yres ||
+-	    copy->sy + copy->height > info->var.yres) {
++	if (copy->dx + copy->width > info->var.xres_virtual ||
++	    copy->sx + copy->width > info->var.xres_virtual ||
++	    copy->dy + copy->height > info->var.yres_virtual ||
++	    copy->sy + copy->height > info->var.yres_virtual) {
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+-- 
+1.9.1
+
