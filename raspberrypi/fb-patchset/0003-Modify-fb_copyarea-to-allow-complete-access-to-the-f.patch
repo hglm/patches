@@ -1,0 +1,38 @@
+From 12586dcab6118242917e3292849e840d0581746b Mon Sep 17 00:00:00 2001
+From: Harm Hanemaaijer <fgenfb@yahoo.com>
+Date: Tue, 24 Feb 2015 21:37:10 +0100
+Subject: [PATCH 3/3] Modify fb_copyarea to allow complete access to the
+ framebuffer
+
+The function fb_copyarea_user in the core fb layer (in fbmem.c) for
+accelerated copyarea functions is modified to allow access to the
+whole framebuffer as determined by the xres_virtual and yres_virtual
+parameters, instead of just the first screen page.
+
+Signed-off-by: Harm Hanemaaijer <fgenfb@yahoo.com>
+---
+ drivers/video/fbdev/core/fbmem.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/video/fbdev/core/fbmem.c b/drivers/video/fbdev/core/fbmem.c
+index 771992a..aa95f4e 100644
+--- a/drivers/video/fbdev/core/fbmem.c
++++ b/drivers/video/fbdev/core/fbmem.c
+@@ -1090,10 +1090,10 @@ static int fb_copyarea_user(struct fb_info *info,
+ 	int ret = 0;
+ 	if (!lock_fb_info(info))
+ 		return -ENODEV;
+-	if (copy->dx + copy->width > info->var.xres ||
+-	    copy->sx + copy->width > info->var.xres ||
+-	    copy->dy + copy->height > info->var.yres ||
+-	    copy->sy + copy->height > info->var.yres) {
++	if (copy->dx + copy->width > info->var.xres_virtual ||
++	    copy->sx + copy->width > info->var.xres_virtual ||
++	    copy->dy + copy->height > info->var.yres_virtual ||
++	    copy->sy + copy->height > info->var.yres_virtual) {
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+-- 
+1.9.1
+

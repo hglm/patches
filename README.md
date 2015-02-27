@@ -66,11 +66,16 @@ and would require some work to adapt.
 
 ##Improvements for the Raspberry Pi/Raspberry Pi 2 fb layer
 
-The patch set in the raspberrypi/extend-fb directory contains two
-patches. The first one disables the use of DMA copy for console
-text scrolling on the Raspberry Pi 2 because the new model no longer
-benefits, with optimized screen redraw (as implemented using the
-optimized cfb functions mentioned above) providing better performance.
+The directory raspberrypi/fb-patchset contains a patchset for the Raspberry
+Pi 1/2 Linux kernel that extends the console fb interface to use triple-
+buffering, also extending the DMA-accelerated CopyArea system call. The
+default text scrolling method is also changed from DMA to optimized screen
+redraw for the Raspberry Pi 2. The patch set contains three patches.
+
+The first one disables the use of DMA copy for console text scrolling on
+the Raspberry Pi 2 because the new model no longer benefits, with optimized
+screen redraw (as implemented using the optimized cfb functions mentioned
+above) providing better performance.
 
 The second patch extends the fb layer used by the Raspberry Pi and
 Raspberry Pi 2 to provide three screen buffers instead of only one.
@@ -78,3 +83,6 @@ This facilitates smooth animation by making double or triple-buffering
 possible in console applications. The DMA-accelerated copyarea is also
 extended to all of the extended framebuffer.
 
+The third patch updates the fb_copyarea function in the core fb layer to
+allow the accelerated CopyArea system call access to the whole framebuffer
+when triple buffering is enabled.

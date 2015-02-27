@@ -1,3 +1,10 @@
-Directory extend-fb contains patches for the fb layer of the Raspberry
-Pi kernel.
+The directory fb-patchset contains a patchset for the Raspberry Pi 1/2
+Linux kernel that extends the console fb interface to use triple-buffering,
+also extending the DMA-accelerated CopyArea system call. The default text
+scrolling method is also changed from DMA to optimized screen redraw for
+the Raspberry Pi 2.
+
+Directory extend-fb contains obsolete patches for the fb layer of the
+Raspberry Pi kernel, which have superseeded by the patchset mentioned
+above.
 
